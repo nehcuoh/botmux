@@ -357,6 +357,7 @@ botmux autostart enable
 | `botmux autostart enable` | 注册开机自启（macOS launchd / Linux user systemd，无需 sudo） |
 | `botmux autostart disable` | 注销开机自启 |
 | `botmux autostart status` | 查看自启状态 |
+| `botmux dashboard` | 输出一次 Web Dashboard URL（每次刷 token，旧链接立即失效） |
 
 ### 开机自启
 
@@ -383,6 +384,34 @@ botmux autostart enable
 | `botmux schedule list/remove/pause/resume/run` | 管理定时任务 |
 
 这些命令依赖 `~/.botmux/bin/botmux` 这个 wrapper 脚本，daemon 启动时自动写入并加入 worker 的 PATH，版本始终与 daemon 一致（不需要 `npm i -g`）。
+
+---
+
+## Web Dashboard
+
+botmux 启动后会自带一个 Web Dashboard 用来管理所有会话和定时任务。
+
+```bash
+botmux dashboard
+# 输出: http://<lan-ip>:7891/?t=<token>
+```
+
+每次跑 `botmux dashboard` 都会换一个 token，老 URL 立即失效——这是有意为之，符合一次一密的取链方式。
+
+页面功能（v1）：
+- **Sessions**：跨所有 bot 列出活跃和已关闭会话，支持按 CLI / 状态 / adopt / 文本搜索过滤。点进 detail drawer 后可以「定位到飞书话题」（机器人在原话题发一条 📍 标记 + 浏览器自动开 chat AppLink，规避飞书没有公开 topic deep-link 的限制）、复制各种 ID、关闭会话。
+- **Schedules**：列出所有定时任务，可以 Run now / Pause / Resume。
+
+环境变量（写在 `~/.botmux/.env`）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `BOTMUX_DASHBOARD_HOST` | `0.0.0.0` | dashboard HTTP 绑定地址 |
+| `BOTMUX_DASHBOARD_PORT` | `7891` | dashboard HTTP 端口 |
+| `BOTMUX_DASHBOARD_EXTERNAL_HOST` | `WEB_EXTERNAL_HOST` 或 LAN IP 自动探测 | CLI 输出 URL 用的 host |
+| `BOTMUX_DAEMON_IPC_BASE_PORT` | `7892` | 每个 daemon 的 IPC 端口 = base + botIndex |
+
+dashboard 走单独 pm2 进程 `botmux-dashboard`，跟着 `pnpm daemon:restart` 一起起停。每个 daemon 在 127.0.0.1 暴露内部 IPC（仅本机），dashboard 进程做反向代理 + 鉴权。`.dashboard-secret` 在首次启动时生成（`~/.botmux/.dashboard-secret`，mode 0600），仅用于 `botmux dashboard` 命令的 HMAC 鉴权，不下发给浏览器。
 
 ---
 

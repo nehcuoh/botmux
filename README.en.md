@@ -424,6 +424,7 @@ botmux setup
 | `botmux autostart enable` | Register boot-time autostart (macOS launchd / Linux user systemd, no sudo) |
 | `botmux autostart disable` | Unregister boot-time autostart |
 | `botmux autostart status` | Show autostart status |
+| `botmux dashboard` | Print a fresh Web Dashboard URL (rotates the token; previous URL becomes invalid) |
 
 ### Boot-time Autostart
 
@@ -450,6 +451,34 @@ Run from inside a botmux-spawned CLI session — session context is auto-detecte
 | `botmux schedule list/remove/pause/resume/run` | Manage scheduled tasks |
 
 These require the `~/.botmux/bin/botmux` wrapper, which the daemon writes at startup and prepends to the worker's `PATH` — always matches the running daemon's version (no `npm i -g` needed).
+
+---
+
+## Web Dashboard
+
+botmux ships a LAN-accessible Web Dashboard for managing all sessions and scheduled tasks across every configured bot.
+
+```bash
+botmux dashboard
+# prints: http://<lan-ip>:7891/?t=<token>
+```
+
+Each invocation rotates the token — previous URLs are invalidated immediately. This is by design, so a leaked link stops working as soon as you fetch a new one.
+
+v1 features:
+- **Sessions board** — every active and closed session across every bot, filterable by CLI / status / adopt / free-text. The detail drawer exposes a "📍 定位到飞书话题" button that posts a marker into the original thread (workaround for Feishu having no public topic deep-link), then opens AppLink to the chat. Also: copy IDs, close session, open xterm.
+- **Schedules board** — every scheduled task across every bot, with Run-now / Pause / Resume actions.
+
+Environment variables (set in `~/.botmux/.env`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BOTMUX_DASHBOARD_HOST` | `0.0.0.0` | Dashboard HTTP bind address |
+| `BOTMUX_DASHBOARD_PORT` | `7891` | Dashboard HTTP port |
+| `BOTMUX_DASHBOARD_EXTERNAL_HOST` | `WEB_EXTERNAL_HOST` or LAN-IP autodetect | Host used in the printed URL |
+| `BOTMUX_DAEMON_IPC_BASE_PORT` | `7892` | Per-daemon IPC port = base + botIndex |
+
+The dashboard runs as its own pm2 process (`botmux-dashboard`) — `pnpm daemon:restart` brings it up alongside every bot daemon. Each daemon exposes a localhost-only IPC at `127.0.0.1:7892+botIndex`; the dashboard process is a thin reverse proxy + token gate. The HMAC secret at `~/.botmux/.dashboard-secret` (mode `0600`) is generated on first start and is used only to sign `botmux dashboard` rotation requests — it never reaches the browser.
 
 ---
 
