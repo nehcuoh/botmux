@@ -2,9 +2,10 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { logger } from '../utils/logger.js';
 import * as sessionStore from '../services/session-store.js';
-import { listActiveSessions, getActiveSessionByKey } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId } from './worker-pool.js';
 import type { DaemonSession } from './types.js';
 import type { Session } from '../types.js';
+import type { CliId } from '../adapters/cli/types.js';
 
 export interface IpcServerHandle {
   port: number;
@@ -57,7 +58,7 @@ export interface SessionRow {
   sessionId: string;
   larkAppId: string;
   botName: string;
-  cliId: 'claude' | 'codex' | 'gemini' | 'opencode' | 'unknown';
+  cliId: CliId | 'unknown';
   status: 'starting' | 'working' | 'idle' | 'analyzing' | 'closed';
   adopt: boolean;
   spawnedAt: number;
@@ -87,7 +88,7 @@ export function composeRowFromActive(ds: DaemonSession): SessionRow {
     sessionId: ds.session.sessionId,
     larkAppId: ds.larkAppId,
     botName: cachedBotName,
-    cliId: (ds.session.cliId as SessionRow['cliId']) ?? 'unknown',
+    cliId: ds.session.cliId ?? 'unknown',
     status: ds.lastScreenStatus ?? 'starting',
     adopt: !!ds.adoptedFrom,
     spawnedAt: ds.spawnedAt,
@@ -109,7 +110,7 @@ export function composeRowFromClosed(s: Session): SessionRow {
     sessionId: s.sessionId,
     larkAppId: s.larkAppId ?? '',
     botName: cachedBotName,
-    cliId: (s.cliId as SessionRow['cliId']) ?? 'unknown',
+    cliId: s.cliId ?? 'unknown',
     status: 'closed',
     adopt: !!s.adoptedFrom,
     spawnedAt: Date.parse(s.createdAt),
@@ -136,7 +137,7 @@ ipcRoute('GET', '/api/sessions', (_req, res) => {
 });
 
 ipcRoute('GET', '/api/sessions/:sessionId', (_req, res, params) => {
-  const ds = getActiveSessionByKey(params.sessionId);
+  const ds = findActiveBySessionId(params.sessionId);
   if (ds) return jsonRes(res, 200, { session: composeRowFromActive(ds) });
   const closed = sessionStore.listSessions().find(s => s.sessionId === params.sessionId);
   if (closed) return jsonRes(res, 200, { session: composeRowFromClosed(closed) });

@@ -65,7 +65,10 @@ export function listActiveSessions(): DaemonSession[] {
   return activeSessionsRegistry ? [...activeSessionsRegistry.values()] : [];
 }
 
-export function getActiveSessionByKey(sessionId: string): DaemonSession | undefined {
+/** Linear-scan lookup of the active-sessions Map by `Session.sessionId`.
+ *  The Map's actual key is `sessionKey(rootId, larkAppId)` (composite), so we
+ *  cannot use Map.get here. */
+export function findActiveBySessionId(sessionId: string): DaemonSession | undefined {
   if (!activeSessionsRegistry) return undefined;
   for (const s of activeSessionsRegistry.values()) if (s.session.sessionId === sessionId) return s;
   return undefined;

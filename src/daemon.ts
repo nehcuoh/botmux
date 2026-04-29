@@ -34,6 +34,7 @@ import {
   getCurrentCliVersion,
   CARD_POSTING_SENTINEL,
 } from './core/worker-pool.js';
+import { setBotName } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
 import { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation } from './core/command-handler.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
@@ -815,6 +816,10 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Expose the activeSessions Map (owned by daemon) to worker-pool readers,
   // so dashboard IPC and other consumers can list/lookup live sessions.
   setActiveSessionsRegistry(activeSessions);
+  // Seed dashboard IPC botName with the bot's config id; the friendly name from
+  // /bot/v3/info is wired into the registry descriptor (above) but the IPC server
+  // also needs its own copy for SessionRow.botName.
+  setBotName(cfg.larkAppId);
 
   // Per-bot initialization
   for (const bot of getAllBots()) {
