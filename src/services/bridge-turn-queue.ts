@@ -162,13 +162,18 @@ export class BridgeTurnQueue {
         // accidentally contains the fingerprint substring start the
         // wrong turn.
         if (!isMeaningfulUserEvent(ev)) continue;
-        // Defensive: if the previous local turn never accumulated any
-        // assistant text (Claude crashed / was killed / user cancelled
-        // mid-response), drop it now so its empty `assistantUuids` doesn't
-        // head-of-line block every subsequent emit. Lark turns are NOT
-        // dropped here — they may still be in tool-use legitimately, and
-        // Lark-side timeout is tracked separately by the daemon.
-        if (this.collecting && this.collecting.isLocal && this.collecting.assistantUuids.length === 0) {
+        // Defensive: if the previous turn never accumulated any assistant
+        // text, drop it now so its empty `assistantUuids` doesn't
+        // head-of-line block every subsequent emit. Applies to BOTH local
+        // and Lark turns: Claude is single-threaded over the PTY, so a new
+        // meaningful user event in the transcript means the model has
+        // already moved on from the previous turn — if no visible text
+        // landed by now, none ever will (e.g. post-/clear "good" silence,
+        // or model emitted only tool_use without a follow-up text). Tool-use
+        // mid-stream is NOT affected: the tool_result events that come
+        // between tool_use and the final text are filtered out by
+        // `isMeaningfulUserEvent` above and never reach this branch.
+        if (this.collecting && this.collecting.assistantUuids.length === 0) {
           const idx = this.queue.indexOf(this.collecting);
           if (idx >= 0) this.queue.splice(idx, 1);
           this.collecting = null;

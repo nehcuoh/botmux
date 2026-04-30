@@ -162,6 +162,33 @@ describe('BridgeTurnQueue', () => {
     expect(ready[0].assistantUuids).toEqual(['a-final']);
   });
 
+  it('drops a started Lark turn that produced no assistant text when a new Lark turn arrives', () => {
+    // Reproduces the post-/clear silence pattern: user sends "good", model
+    // emits ZERO assistant events (no tool_use, no thinking, no text), then
+    // the user sends "what ???". Without dropping the silent turn, its empty
+    // assistantUuids head-of-line blocks every later turn's emit.
+    //
+    // Safe because Claude can only read a NEW user input from the PTY after
+    // it finishes the previous turn — so a meaningful user event arriving in
+    // the transcript means the model has moved on, regardless of whether
+    // the previous turn was Lark or local.
+    const q = new BridgeTurnQueue();
+    q.mark('t1', makeFingerprint('good'));
+    q.ingest([user('u1', 'good')]);  // matched, started, but model went silent
+    expect(q.peek()[0].turnId).toBe('t1');
+    expect(q.peek()[0].started).toBe(true);
+    expect(q.peek()[0].assistantUuids).toEqual([]);
+
+    // Second Lark message arrives; model responds normally.
+    q.mark('t2', makeFingerprint('what ???'));
+    q.ingest([user('u2', 'what ???'), assistant('a2', 'clarify?')]);
+
+    const ready = q.drainEmittable();
+    expect(ready.map(t => t.turnId)).toEqual(['t2']);
+    expect(ready[0].assistantUuids).toEqual(['a2']);
+    expect(q.size()).toBe(0);
+  });
+
   it('drainEmittable holds back an unstarted turn (Claude has not consumed it)', () => {
     const q = new BridgeTurnQueue();
     q.mark('t1');
@@ -462,32 +489,24 @@ describe('BridgeTurnQueue', () => {
       expect(ready[1].assistantUuids).toEqual(['local-a2']);
     });
 
-    it('documents head-of-line: an empty Lark turn ahead of a ready local turn blocks emission (in practice impossible — Claude is single-threaded and writes Lark assistant text BEFORE any next user event lands in the transcript)', () => {
-      // This case can be constructed in tests but should never happen in
-      // practice: Claude won't accept a local user prompt while still in
-      // the middle of producing assistant output for an earlier Lark turn,
-      // so a-text for t1 always lands in the JSONL before u-local does.
-      // Asserted here as the documented behaviour; a future regression
-      // that breaks this invariant should surface with a clear failure.
+    it('an empty Lark turn ahead of a local turn is dropped (no head-of-line block)', () => {
+      // Originally written as "documents head-of-line block — in practice
+      // impossible". The "impossible" assumption was wrong: Claude can choose
+      // to emit ZERO assistant events for a turn (post-/clear "good"
+      // silence on 2026-04-30 was the wild observation), and the next user
+      // event then lands in the transcript without any preceding assistant
+      // text. The empty-collecting drop now applies to Lark turns too, so
+      // the abandoned turn is removed and the next turn emits cleanly.
       const q = new BridgeTurnQueue();
       q.mark('t1');
-      q.ingest([user('u1')]);  // t1 started, no assistant text yet
-      // Hypothetical local input arrives BEFORE t1's assistant text. With
-      // collecting now bound to the local turn, any later assistant text
-      // is attributed to local-t, NOT t1. t1 stays empty and head-of-line
-      // blocks emission — local-t can't drain past it.
+      q.ingest([user('u1')]);  // t1 started, model went silent
       q.ingest([user('local-u'), assistant('local-a', 'local reply')]);
       const ready = q.drainEmittable();
-      expect(ready).toEqual([]);
-      // Even after another assistant event lands, t1 stays empty (it's
-      // already lost the "collecting" role) — the queue remains blocked
-      // until the test/runtime explicitly clears the empty Lark turn.
-      q.ingest([assistant('late', 'late')]);
-      expect(q.drainEmittable()).toEqual([]);
-      // clearPending() unblocks. (Real-world: this scenario doesn't occur,
-      // but if it ever did the daemon's session lifecycle would be the
-      // safety net.)
-      q.clearPending();
+      // t1 dropped, local turn emits.
+      expect(ready).toHaveLength(1);
+      expect(ready[0].isLocal).toBe(true);
+      expect(ready[0].userUuid).toBe('local-u');
+      expect(ready[0].assistantUuids).toEqual(['local-a']);
       expect(q.size()).toBe(0);
     });
 
