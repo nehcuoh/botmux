@@ -242,14 +242,14 @@ export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: s
 
 // ─── Permission gates ────────────────────────────────────────────────────
 //
-// Two separate gates for oncall support:
+// Two gates:
 //   canTalk    — may address the bot in this chat (prompts, thread replies)
 //   canOperate — may trigger state-changing actions (card buttons, daemon
 //                slash commands like /cd /restart /close /oncall)
 //
-// Non-oncall chats: both fall back to the bot's allowedUsers. Oncall-bound
-// chats: talking is open to everyone; operating is restricted to the entry's
-// `owners` list (initial binder + anyone they later add).
+// Non-oncall chats: both fall back to the bot's allowedUsers.
+// Oncall-bound chats: talking is open to everyone in the group; operating
+// still requires allowedUsers (single source of truth — no per-chat owners).
 
 export function canTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
   const oncall = chatId ? findOncallChat(larkAppId, chatId) : undefined;
@@ -259,9 +259,7 @@ export function canTalk(larkAppId: string, chatId: string | undefined, senderOpe
   return !!senderOpenId && allowedUsers.includes(senderOpenId);
 }
 
-export function canOperate(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
-  const oncall = chatId ? findOncallChat(larkAppId, chatId) : undefined;
-  if (oncall) return !!senderOpenId && oncall.owners.includes(senderOpenId);
+export function canOperate(larkAppId: string, _chatId: string | undefined, senderOpenId: string | undefined): boolean {
   const allowedUsers = getBot(larkAppId).resolvedAllowedUsers;
   if (allowedUsers.length === 0) return true;
   return !!senderOpenId && allowedUsers.includes(senderOpenId);

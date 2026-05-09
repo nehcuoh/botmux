@@ -818,7 +818,6 @@ describe('handleCommand', () => {
         LARK_APP_ID,
         CHAT_ID,
         '/home/testuser/projects/foo',
-        'ou_sender',
       );
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(replyContent).toContain('已绑定 oncall');
@@ -842,7 +841,6 @@ describe('handleCommand', () => {
         LARK_APP_ID,
         CHAT_ID,
         '/data00/home/wanghao.muchen/ai-workspace/marketing_insight',
-        'ou_sender',
       );
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(replyContent).toContain('已绑定 oncall');

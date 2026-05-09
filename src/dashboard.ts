@@ -286,8 +286,15 @@ const server = createServer(async (req, res) => {
           if (!r.ok) return;
           const j = await r.json() as { chats?: any[] };
           for (const c of j.chats ?? []) {
-            const cur = out.get(c.chatId) ?? { ...c, memberBots: [] as any[] };
-            cur.memberBots.push({ larkAppId: d.larkAppId, botName: d.botName, inChat: true });
+            // Strip oncallChat from chat-level — it's per-bot, surface inside memberBots only
+            const { oncallChat, ...chatBase } = c;
+            const cur = out.get(c.chatId) ?? { ...chatBase, memberBots: [] as any[] };
+            cur.memberBots.push({
+              larkAppId: d.larkAppId,
+              botName: d.botName,
+              inChat: true,
+              oncallChat: oncallChat ?? null,
+            });
             out.set(c.chatId, cur);
           }
         } catch { /* skip offline daemons silently — best-effort */ }
@@ -297,7 +304,7 @@ const server = createServer(async (req, res) => {
         const present = new Set<string>(c.memberBots.map((mb: any) => mb.larkAppId));
         for (const b of onlineBots) {
           if (!present.has(b.larkAppId)) {
-            c.memberBots.push({ larkAppId: b.larkAppId, botName: b.botName, inChat: false });
+            c.memberBots.push({ larkAppId: b.larkAppId, botName: b.botName, inChat: false, oncallChat: null });
           }
         }
       }
@@ -433,6 +440,36 @@ const server = createServer(async (req, res) => {
         };
       }));
       return jsonRes(res, 200, { result });
+    }
+
+    // ─── Oncall bindings (per chat × bot) ────────────────────────────────────
+    // PUT /api/groups/:chatId/oncall/:larkAppId    body: {workingDir}
+    // DELETE /api/groups/:chatId/oncall/:larkAppId
+    let mOncall: RegExpMatchArray | null;
+    if ((mOncall = url.pathname.match(/^\/api\/groups\/([^/]+)\/oncall\/([^/]+)$/))) {
+      const chatId = decodeURIComponent(mOncall[1]);
+      const appId = decodeURIComponent(mOncall[2]);
+      if (req.method === 'PUT') {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+        const upstream = await proxyToDaemon(
+          appId, `/api/oncall/${encodeURIComponent(chatId)}`,
+          { method: 'PUT', headers: { 'content-type': 'application/json' }, body: raw },
+        );
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(await upstream.text());
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const upstream = await proxyToDaemon(
+          appId, `/api/oncall/${encodeURIComponent(chatId)}`,
+          { method: 'DELETE' },
+        );
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(await upstream.text());
+        return;
+      }
     }
 
     // Create a new chat — pick a creator from the user-selected larkAppIds

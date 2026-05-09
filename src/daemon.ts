@@ -349,10 +349,10 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       return;
     }
     if (DAEMON_COMMANDS.has(cmd)) {
-      // Oncall groups: any member can talk, but daemon commands (except /oncall
-      // itself which gates bind/unbind inside) are owner-only.
-      if (cmd !== '/oncall' && findOncallChat(larkAppId, chatId) && !canOperate(larkAppId, chatId, senderOpenId)) {
-        await sessionReply(anchor, `⚠️ ${cmd} 仅 oncall owner 可执行。`, 'text', larkAppId);
+      // Oncall groups: anyone can chat with the bot, but daemon commands
+      // (including /oncall itself) require allowedUsers.
+      if (findOncallChat(larkAppId, chatId) && !canOperate(larkAppId, chatId, senderOpenId)) {
+        await sessionReply(anchor, `⚠️ ${cmd} 仅 allowedUsers 可执行。`, 'text', larkAppId);
         return;
       }
       // Same rootMessageId reasoning as below in the main spawn path:
@@ -536,12 +536,12 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       return;
     }
     if (DAEMON_COMMANDS.has(cmd)) {
-      // Oncall owner gate for thread-reply daemon commands
+      // Oncall allowedUsers gate for thread-reply daemon commands
       const existingDs = activeSessions.get(sessionKey(anchor, larkAppId));
       const threadChatId = existingDs?.chatId ?? ctxChatId ?? data?.message?.chat_id;
       const threadSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
-      if (cmd !== '/oncall' && threadChatId && findOncallChat(larkAppId, threadChatId) && !canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
-        sessionReply(anchor, `⚠️ ${cmd} 仅 oncall owner 可执行。`, 'text', larkAppId);
+      if (threadChatId && findOncallChat(larkAppId, threadChatId) && !canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
+        sessionReply(anchor, `⚠️ ${cmd} 仅 allowedUsers 可执行。`, 'text', larkAppId);
         return;
       }
       // Pass mention-stripped content so /command argument parsing works.

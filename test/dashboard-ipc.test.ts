@@ -152,8 +152,47 @@ describe('GET /api/groups (Phase B)', () => {
     const res = await fetch(`http://127.0.0.1:${handle.port}/api/groups`);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.chats).toEqual([{ chatId: 'oc_1', name: 'team' }]);
+    // Each chat now carries an `oncallChat` enrichment (null when unbound)
+    // so the dashboard matrix can render toggle state without a second
+    // round-trip. With no bot registered for 'test-app' the lookup falls
+    // back to undefined → null in the response.
+    expect(body.chats).toEqual([{ chatId: 'oc_1', name: 'team', oncallChat: null }]);
     spy.mockRestore();
+  });
+});
+
+describe('PUT/DELETE /api/oncall/:chatId', () => {
+  it('rejects PUT without workingDir', async () => {
+    setLarkAppId('test-app');
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('workingDir_required');
+  });
+
+  it('rejects PUT with non-existent path', async () => {
+    setLarkAppId('test-app');
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workingDir: '/nonexistent/path/xyz' }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/目录不存在/);
+  });
+
+  it('returns 503 when larkAppId not set (DELETE)', async () => {
+    setLarkAppId('');
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, { method: 'DELETE' });
+    expect(res.status).toBe(503);
   });
 });
 

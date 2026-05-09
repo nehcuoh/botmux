@@ -1677,13 +1677,15 @@ import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
  */
 function buildFooterAddressing(
   s: { ownerOpenId?: string; lastCallerOpenId?: string },
-  oncall: { owners: string[] } | undefined,
+  oncall: { workingDir: string } | undefined,
 ): { sendTo: string | undefined; cc: string[] } {
   const owner = s.ownerOpenId;
   const caller = s.lastCallerOpenId ?? owner;
+  // Oncall: address whoever triggered the turn (may not be the session owner).
+  // Non-oncall: address the session owner. Either way, no `cc` — there's no
+  // longer a per-chat owners list to fan out to.
   if (!oncall) return { sendTo: owner, cc: [] };
-  const cc = oncall.owners.filter(id => id && id !== caller);
-  return { sendTo: caller, cc };
+  return { sendTo: caller, cc: [] };
 }
 
 async function cmdSend(rest: string[]): Promise<void> {

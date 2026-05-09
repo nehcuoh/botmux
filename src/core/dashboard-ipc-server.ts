@@ -1,14 +1,18 @@
 // src/core/dashboard-ipc-server.ts
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
+import { existsSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { logger } from '../utils/logger.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
+import * as oncallStore from '../services/oncall-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession } from './worker-pool.js';
 import { replyMessage, sendMessage } from '../im/lark/client.js';
 import { locateLimiter } from './dashboard-locate.js';
 import { dashboardEventBus } from './dashboard-events.js';
+import { expandHome } from './session-manager.js';
 import {
   composeRowFromActive,
   composeRowFromClosed,
@@ -218,7 +222,13 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   try {
     const chats = await groupsStore.listChats(cachedLarkAppId);
-    jsonRes(res, 200, { chats });
+    // Annotate each chat with its oncall binding (if any) so the dashboard
+    // matrix can show toggle state without a second round-trip.
+    const enriched = chats.map(c => {
+      const oncall = oncallStore.getOncallStatus(cachedLarkAppId, c.chatId);
+      return { ...c, oncallChat: oncall ?? null };
+    });
+    jsonRes(res, 200, { chats: enriched });
   } catch (e) {
     jsonRes(res, 502, { error: String(e) });
   }
@@ -266,6 +276,43 @@ ipcRoute('POST', '/api/groups/:chatId/leave', async (_req, res, p) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   const r = await groupsStore.leaveChat(cachedLarkAppId, p.chatId);
   jsonRes(res, 200, r);
+});
+
+// ─── Oncall bindings (dashboard) ───────────────────────────────────────────
+// PUT  /api/oncall/:chatId  body: {workingDir} — bind or update workingDir
+// DELETE /api/oncall/:chatId — unbind
+//
+// Auth: dashboard's loopback token is the gate. No per-chat owner concept —
+// allowedUsers governs who can operate via Lark too (see canOperate).
+
+ipcRoute('PUT', '/api/oncall/:chatId', async (req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { workingDir?: unknown };
+  try { body = await readJsonBody<{ workingDir?: string }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const workingDir = typeof body.workingDir === 'string' ? body.workingDir.trim() : '';
+  if (!workingDir) return jsonRes(res, 400, { ok: false, error: 'workingDir_required' });
+
+  // Same validation as /oncall bind in Lark — exists + is a directory.
+  const resolvedPath = resolve(expandHome(workingDir));
+  if (!existsSync(resolvedPath)) {
+    return jsonRes(res, 400, { ok: false, error: `目录不存在：${resolvedPath}` });
+  }
+  let isDir = false;
+  try { isDir = statSync(resolvedPath).isDirectory(); }
+  catch (e: any) { return jsonRes(res, 400, { ok: false, error: `无法读取路径：${resolvedPath}（${e?.message ?? e}）` }); }
+  if (!isDir) return jsonRes(res, 400, { ok: false, error: `路径不是目录：${resolvedPath}` });
+
+  const r = oncallStore.bindOncall(cachedLarkAppId, p.chatId, workingDir);
+  if (!r.ok) return jsonRes(res, 400, r);
+  jsonRes(res, 200, { ok: true, entry: r.entry, created: r.created, resolvedPath });
+});
+
+ipcRoute('DELETE', '/api/oncall/:chatId', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const r = oncallStore.unbindOncall(cachedLarkAppId, p.chatId);
+  if (!r.ok) return jsonRes(res, r.reason === 'not_bound' ? 404 : 400, r);
+  jsonRes(res, 200, { ok: true });
 });
 
 // Create a brand-new chat with this bot as creator/owner and `larkAppIds` as

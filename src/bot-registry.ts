@@ -9,8 +9,6 @@ export interface OncallChat {
   chatId: string;
   /** Default working directory used for every new topic spawned in this chat. */
   workingDir: string;
-  /** open_id allowlist — may only operate (cards / daemon commands). Empty = initial binder only (set at bind time). */
-  owners: string[];
 }
 
 export interface BotConfig {
@@ -23,7 +21,7 @@ export interface BotConfig {
   workingDirs?: string[];
   allowedUsers?: string[];
   projectScanDir?: string;
-  /** Oncall bindings: chat_id → default workingDir + owners. Any group member can talk; only owners can run card buttons / daemon commands. */
+  /** Oncall bindings: chat_id → default workingDir. Any group member can talk; allowedUsers still gates card buttons / daemon commands. */
   oncallChats?: OncallChat[];
 }
 
@@ -159,7 +157,6 @@ function parseBotConfigFile(filePath: string): BotConfig[] {
         .map((c: any) => ({
           chatId: c.chatId,
           workingDir: c.workingDir,
-          owners: Array.isArray(c.owners) ? c.owners.filter((o: any) => typeof o === 'string') : [],
         }));
     }
 

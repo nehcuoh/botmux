@@ -71,3 +71,11 @@ dialog#g-drawer fieldset legend { padding: 0 0.3rem; color: var(--muted); font-s
 .bulk-bar #bulk-count { font-weight: 600; margin-right: 0.5rem; }
 input.row-select { cursor: pointer; }
 #select-all { cursor: pointer; }
+
+.oncall-row { padding: 0.4rem 0; border-top: 1px dashed var(--border); }
+.oncall-row:first-of-type { border-top: none; }
+.oncall-row-body { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.3rem; padding-left: 1.6rem; flex-wrap: wrap; }
+.oncall-row-body input[type=text] { flex: 1; min-width: 220px; padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+.oncall-row-body input[type=text]:disabled { background: #f6f8fa; color: var(--muted); }
+.oncall-status { font-size: 12px; color: var(--muted); }
+.oncall-status.hint-ok { background: transparent; border: none; padding: 0; margin: 0; color: #1a7f37; }

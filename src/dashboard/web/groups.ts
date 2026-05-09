@@ -301,6 +301,32 @@ export async function renderGroupsPage(root: HTMLElement) {
         <p><b>owner:</b> <code>${escapeHtml(chat.ownerId ?? '(unknown)')}</code></p>
 
         <fieldset>
+          <legend>Oncall 模式</legend>
+          <p><small>开启后：群内任何成员都能 @ 机器人提问，新话题直接用绑定目录启动 CLI；仅 allowedUsers 仍可执行 /cd /restart 等命令。</small></p>
+          ${inChat.length === 0
+            ? `<p class="empty">没有机器人在群里</p>`
+            : inChat.map((m: any) => {
+              const enabled = !!m.oncallChat;
+              const wd = m.oncallChat?.workingDir ?? '';
+              return `
+                <div class="oncall-row" data-bot="${escapeHtml(m.larkAppId)}">
+                  <label class="checkbox-row">
+                    <input type="checkbox" data-action="toggle" ${enabled ? 'checked' : ''}>
+                    <strong>${escapeHtml(m.botName ?? m.larkAppId)}</strong>
+                    <small>(${escapeHtml(m.larkAppId)})</small>
+                  </label>
+                  <div class="oncall-row-body">
+                    <input type="text" data-input="workingDir" placeholder="e.g. /root/iserver/botmux"
+                           value="${escapeHtml(wd)}" ${enabled ? '' : 'disabled'}>
+                    <button type="button" data-action="save">Save</button>
+                    <span class="oncall-status" data-status></span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+        </fieldset>
+
+        <fieldset>
           <legend>选择机器人退出群聊</legend>
           ${inChat.length === 0
             ? `<p class="empty">没有机器人在群里</p>`
@@ -321,6 +347,58 @@ export async function renderGroupsPage(root: HTMLElement) {
         <form method="dialog"><button>关闭</button></form>
       </article>`;
     drawer.showModal();
+
+    // Oncall row interactions: toggle enables/disables the input; Save commits.
+    drawer.querySelectorAll<HTMLDivElement>('.oncall-row').forEach(row => {
+      const appId = row.dataset.bot!;
+      const cb = row.querySelector<HTMLInputElement>('input[data-action=toggle]')!;
+      const input = row.querySelector<HTMLInputElement>('input[data-input=workingDir]')!;
+      const saveBtn = row.querySelector<HTMLButtonElement>('button[data-action=save]')!;
+      const statusEl = row.querySelector<HTMLSpanElement>('[data-status]')!;
+      cb.addEventListener('change', () => {
+        input.disabled = !cb.checked;
+        if (cb.checked) input.focus();
+      });
+      saveBtn.addEventListener('click', async () => {
+        statusEl.textContent = '';
+        statusEl.className = 'oncall-status';
+        const want = cb.checked;
+        const wd = input.value.trim();
+        if (want && !wd) {
+          statusEl.textContent = '请填工作目录';
+          statusEl.classList.add('hint-warn-inline');
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          const url = `/api/groups/${encodeURIComponent(chat.chatId)}/oncall/${encodeURIComponent(appId)}`;
+          const r = want
+            ? await fetch(url, {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ workingDir: wd }),
+              })
+            : await fetch(url, { method: 'DELETE' });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body.ok) {
+            statusEl.textContent = want
+              ? `✓ 已绑定 → ${body.resolvedPath ?? wd}`
+              : '✓ 已解绑';
+            statusEl.classList.add('hint-ok');
+            // Refresh cache so reopening the drawer reflects new state
+            void loadGroups().catch(() => { /* tolerate */ });
+          } else {
+            statusEl.textContent = `✗ ${body.error ?? r.status}`;
+            statusEl.classList.add('hint-warn-inline');
+          }
+        } catch (e: any) {
+          statusEl.textContent = `✗ ${e?.message ?? e}`;
+          statusEl.classList.add('hint-warn-inline');
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    });
 
     drawer.querySelector<HTMLButtonElement>('#g-leave-btn')!.onclick = async () => {
       const checked = [...drawer.querySelectorAll<HTMLInputElement>('input[name=leave-bot]:checked')]

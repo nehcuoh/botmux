@@ -1,7 +1,11 @@
 /**
- * Oncall bindings — persist chat_id → default workingDir + owners into the
- * bot config JSON file, and keep the in-memory BotConfig in sync so events
- * pick up changes without a daemon restart.
+ * Oncall bindings — persist chat_id → default workingDir into the bot config
+ * JSON file, and keep the in-memory BotConfig in sync so events pick up
+ * changes without a daemon restart.
+ *
+ * Permission model is intentionally simple: anyone in the bot's allowedUsers
+ * can bind/unbind/edit (enforced at the call sites — daemon command handler
+ * + dashboard token gate). No per-chat owner list.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { getBot, getLoadedConfigPath, type OncallChat } from '../bot-registry.js';
@@ -24,26 +28,18 @@ function findEntryIndex(raw: any[], larkAppId: string): number {
 }
 
 /**
- * Upsert an oncall binding. If the chat is already bound, only existing owners
- * can update the workingDir (ownerOpenId must be in owners). First-time bind
- * puts the caller into owners automatically.
+ * Upsert an oncall binding. Returns whether it was newly created.
  */
 export function bindOncall(
   larkAppId: string,
   chatId: string,
   workingDir: string,
-  ownerOpenId: string,
 ): { ok: true; entry: OncallChat; created: boolean } | { ok: false; reason: string } {
   const bot = getBot(larkAppId);
   const existingList = bot.config.oncallChats ?? [];
   const existing = existingList.find(c => c.chatId === chatId);
-  if (existing && !existing.owners.includes(ownerOpenId)) {
-    return { ok: false, reason: 'not_owner' };
-  }
 
-  const next: OncallChat = existing
-    ? { ...existing, workingDir }
-    : { chatId, workingDir, owners: [ownerOpenId] };
+  const next: OncallChat = { chatId, workingDir };
 
   const { path, raw } = loadRawConfig();
   const idx = findEntryIndex(raw, larkAppId);
@@ -51,7 +47,12 @@ export function bindOncall(
 
   const cur: OncallChat[] = Array.isArray(raw[idx].oncallChats) ? raw[idx].oncallChats : [];
   const curIdx = cur.findIndex((c: OncallChat) => c.chatId === chatId);
-  if (curIdx >= 0) cur[curIdx] = next; else cur.push(next);
+  if (curIdx >= 0) {
+    // Preserve any unknown keys the user might have added by hand.
+    cur[curIdx] = { ...cur[curIdx], ...next };
+  } else {
+    cur.push(next);
+  }
   raw[idx].oncallChats = cur;
   writeRawConfig(path, raw);
 
@@ -60,19 +61,17 @@ export function bindOncall(
   const memIdx = inMem.findIndex(c => c.chatId === chatId);
   if (memIdx >= 0) inMem[memIdx] = next; else inMem.push(next);
 
-  logger.info(`[oncall:${larkAppId}] bind chat=${chatId} dir=${workingDir} owner=${ownerOpenId}`);
+  logger.info(`[oncall:${larkAppId}] bind chat=${chatId} dir=${workingDir}`);
   return { ok: true, entry: next, created: !existing };
 }
 
 export function unbindOncall(
   larkAppId: string,
   chatId: string,
-  ownerOpenId: string,
 ): { ok: true } | { ok: false; reason: string } {
   const bot = getBot(larkAppId);
   const existing = bot.config.oncallChats?.find(c => c.chatId === chatId);
   if (!existing) return { ok: false, reason: 'not_bound' };
-  if (!existing.owners.includes(ownerOpenId)) return { ok: false, reason: 'not_owner' };
 
   const { path, raw } = loadRawConfig();
   const idx = findEntryIndex(raw, larkAppId);
@@ -84,10 +83,16 @@ export function unbindOncall(
   if (bot.config.oncallChats) {
     bot.config.oncallChats = bot.config.oncallChats.filter(c => c.chatId !== chatId);
   }
-  logger.info(`[oncall:${larkAppId}] unbind chat=${chatId} by=${ownerOpenId}`);
+  logger.info(`[oncall:${larkAppId}] unbind chat=${chatId}`);
   return { ok: true };
 }
 
 export function getOncallStatus(larkAppId: string, chatId: string): OncallChat | undefined {
-  return getBot(larkAppId).config.oncallChats?.find(c => c.chatId === chatId);
+  // Defensive: dashboard callers may probe with an app id whose bot isn't
+  // registered yet (boot races, or tests exercising the IPC layer without
+  // a full registry). Treat "no such bot" as "no oncall binding" — this
+  // is best-effort enrichment, not a critical path.
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return undefined; }
+  return bot.config.oncallChats?.find(c => c.chatId === chatId);
 }
