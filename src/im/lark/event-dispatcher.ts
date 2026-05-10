@@ -348,9 +348,26 @@ export function extractMessageTextForRouting(message: any): string | null {
   if (!message?.content) return null;
   try {
     const obj = JSON.parse(message.content);
-    // text shape: {"text":"..."}
-    if (typeof obj?.text === 'string') return obj.text;
+    // text shape: {"text":"..."}. Lark stuffs placeholder keys like "@_user_1"
+    // into obj.text; the human name only lives in message.mentions[].name. We
+    // must resolve keys → @${name} so stripLeadingMentions can strip them
+    // before parseForceTopicInvocation sees the content. Mirrors the
+    // resolveMentions logic in parseEventMessage.
+    if (typeof obj?.text === 'string') {
+      let text: string = obj.text;
+      const mentions = message?.mentions;
+      if (Array.isArray(mentions)) {
+        for (const m of mentions) {
+          if (m?.key && m?.name) {
+            text = text.split(m.key).join(`@${m.name}`);
+          }
+        }
+      }
+      return text;
+    }
     // post shape: {"zh_cn":{"content":[[{tag:"text",text:"..."},{tag:"at",...}]]}}
+    // Post messages keep @mentions as separate `at` nodes (not embedded in
+    // text), so the joined text-node content is already clean of placeholders.
     const inner = obj?.zh_cn ?? obj?.en_us ?? obj;
     if (Array.isArray(inner?.content)) {
       const parts: string[] = [];

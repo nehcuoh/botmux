@@ -684,6 +684,58 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     }));
   });
 
+  it('resolves Lark mention keys (@_user_N) before /t detection', async () => {
+    // Real Lark text messages put placeholder keys like "@_user_1" in obj.text;
+    // the human-readable name lives in message.mentions[].name. Without
+    // resolving keys → @${name} first, stripLeadingMentions can't strip them
+    // and /t never matches.
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@_bot_a /t real lark form' }),
+      messageId: 'msg-force-key-1',
+      chatId: 'chat-force-key-1',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-force-key-1',
+    }));
+  });
+
+  it('resolves multiple mention keys (multi-bot @ /t scenario)', async () => {
+    // User @s two bots in front of /t. Both keys must be resolved/stripped
+    // before parseForceTopicInvocation sees the prefix.
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@_bot_a @_bot_b /t multi-bot' }),
+      messageId: 'msg-force-key-2',
+      chatId: 'chat-force-key-2',
+      chatType: 'group',
+      mentions: [
+        { key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_bot_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([
+      { openId: MY_OPEN_ID, name: 'BotA' },
+      { openId: OTHER_BOT_OPEN_ID, name: 'BotB' },
+    ]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-force-key-2',
+    }));
+  });
+
   it('still ignores when sender is not allowed (permission gate runs first)', async () => {
     // Even with /t, an un-allow-listed user gets the same not_allowed treatment.
     mockGetBot.mockReturnValue({
