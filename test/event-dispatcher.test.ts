@@ -550,6 +550,165 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
   });
 });
 
+describe('im.message.receive_v1 — /t force-topic override', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    setupBotState();
+    handlers = makeHandlers();
+    _resetBotMentionDedup();
+    mockGetChatMode.mockResolvedValue('group'); // 普通群
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('flips chat-scope to thread-scope on /t in 普通群 (text message)', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA /t 帮我看 X' }),
+      messageId: 'msg-force-1',
+      chatId: 'chat-force-1',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-force-1',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('flips even when chat-scope session is currently active (the v1 limitation fix)', async () => {
+    // The user's exact scenario: bot owns a chat-scope session in 普通群,
+    // user sends `@bot /t xxx` — must spawn a fresh thread, NOT pass through.
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA /t open new topic' }),
+      messageId: 'msg-force-2',
+      chatId: 'chat-force-2',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    // Bot already owns chat-scope at chat-force-2 — but /t must override.
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-force-2');
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-force-2',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('detects /t inside a post message (multi-paragraph content)', async () => {
+    const postContent = JSON.stringify({
+      zh_cn: {
+        content: [[
+          { tag: 'at', user_id: MY_OPEN_ID },
+          { tag: 'text', text: ' /t 看下 README' },
+        ]],
+      },
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: postContent,
+      messageId: 'msg-force-3',
+      chatId: 'chat-force-3',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    // post message_type
+    (event.message as any).message_type = 'post';
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-force-3',
+      larkAppId: MY_APP_ID,
+    }));
+  });
+
+  it('does NOT flip when message has no /t prefix', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA hello' }),
+      messageId: 'msg-noflip-1',
+      chatId: 'chat-noflip-1',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    // No /t → routing stays chat-scope (anchor = chatId)
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-noflip-1',
+    }));
+  });
+
+  it('does NOT flip when scope is already thread (e.g. real Lark 话题 in 普通群)', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA /t inside an existing thread' }),
+      rootId: 'root-existing',
+      threadId: 'omt_existing',
+      messageId: 'msg-noflip-2',
+      chatId: 'chat-noflip-2',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    // Already thread-scope → keep anchor = root_id, do NOT change to messageId.
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'root-existing',
+    }));
+  });
+
+  it('still ignores when sender is not allowed (permission gate runs first)', async () => {
+    // Even with /t, an un-allow-listed user gets the same not_allowed treatment.
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: MY_OPEN_ID,
+      resolvedAllowedUsers: ['ou_only_this_user'],
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_random_user',
+      content: JSON.stringify({ text: '@BotA /t sneaky' }),
+      messageId: 'msg-force-perm',
+      chatId: 'chat-force-perm',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+});
+
 describe('writeBotInfoFile — multi-daemon merge', () => {
   beforeEach(() => {
     mockExistsSync.mockReturnValue(true);

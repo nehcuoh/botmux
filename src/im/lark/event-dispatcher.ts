@@ -11,6 +11,8 @@ import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
 import { isBotMentionMessageHandled, markBotMentionMessageHandled } from '../../utils/bot-mention-dedup.js';
+import { parseForceTopicInvocation } from '../../core/command-handler.js';
+import { stripLeadingMentions } from './message-parser.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -329,6 +331,69 @@ export interface EventHandlers {
   isSessionOwner?: (anchor: string, larkAppId: string) => boolean;
 }
 
+/**
+ * Best-effort plain-text extraction from a Lark message for routing-level
+ * decisions (currently: `/t` / `/topic` detection). Handles the two common
+ * shapes — `text` (`{"text": "..."}`) and `post` (zh_cn/en_us nested
+ * paragraphs of `text` / `at` nodes). Other types (image, file, sticker,
+ * interactive, …) return null so the caller falls through to the default
+ * routing path.
+ *
+ * Kept deliberately tiny rather than reusing parseEventMessage: the dispatcher
+ * runs on every inbound event and we only need a quick text peek before the
+ * permission gates / scope override; full parseEventMessage still runs once
+ * inside the chosen handler.
+ */
+export function extractMessageTextForRouting(message: any): string | null {
+  if (!message?.content) return null;
+  try {
+    const obj = JSON.parse(message.content);
+    // text shape: {"text":"..."}
+    if (typeof obj?.text === 'string') return obj.text;
+    // post shape: {"zh_cn":{"content":[[{tag:"text",text:"..."},{tag:"at",...}]]}}
+    const inner = obj?.zh_cn ?? obj?.en_us ?? obj;
+    if (Array.isArray(inner?.content)) {
+      const parts: string[] = [];
+      for (const para of inner.content) {
+        if (!Array.isArray(para)) continue;
+        for (const node of para) {
+          if (node?.tag === 'text' && typeof node.text === 'string') {
+            parts.push(node.text);
+          }
+        }
+      }
+      return parts.length > 0 ? parts.join('') : null;
+    }
+  } catch { /* malformed content — skip */ }
+  return null;
+}
+
+/**
+ * If the inbound message starts with `/t` / `/topic` AND the routing
+ * currently lands on chat-scope, override to thread-scope anchored at
+ * the inbound message_id. This makes "force topic mode" work even when
+ * the bot already owns a chat-scope session in the chat — the dispatcher
+ * routes to handleNewTopic at a fresh anchor instead of falling into
+ * handleThreadReply on the chat-scope owner.
+ *
+ * Already-thread messages (real Lark 话题, p2p, 话题群) are left alone:
+ * the prefix is still stripped downstream by handleNewTopic.
+ */
+export function maybeApplyForceTopicOverride(
+  routing: { scope: 'thread' | 'chat'; anchor: string },
+  message: any,
+  messageId: string,
+): boolean {
+  if (routing.scope !== 'chat') return false;
+  const rawText = extractMessageTextForRouting(message);
+  if (!rawText) return false;
+  const stripped = stripLeadingMentions(rawText.trim(), message?.mentions ?? []);
+  if (!parseForceTopicInvocation(stripped)) return false;
+  routing.scope = 'thread';
+  routing.anchor = messageId;
+  return true;
+}
+
 /** Compute the scope + anchor for an inbound message:
  *   - root_id + thread_id     → thread-scope, anchor = root_id (real Lark 话题)
  *   - 话题群 + no real thread → thread-scope, anchor = message_id (thread seed)
@@ -473,6 +538,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const routing = await decideRouting(larkAppId, message);
+
+        // /t / /topic in 普通群: flip routing to thread-scope so the bot's
+        // first reply seeds a fresh Lark thread, even if a chat-scope session
+        // is currently active in this chat.
+        if (maybeApplyForceTopicOverride(routing, message, messageId)) {
+          logger.info(`[/t] Force-topic override: msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
+        }
+
         const ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
 
         // Permission gating — same shape as before, just keyed on
