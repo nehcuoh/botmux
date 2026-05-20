@@ -26,7 +26,7 @@ export function resolveCliId(input: string | undefined): CliId | undefined {
   if (mapped) return mapped;
   if (VALID_CLI_IDS.has(raw)) return raw as CliId;
   throw new Error(
-    `Unknown CLI 适配器 "${raw}"。请输入序号 1-6 或合法 ID 之一: ${[...VALID_CLI_IDS].join(', ')}`,
+    `Unknown CLI 适配器 "${raw}"。请输入序号 1-7 或合法 ID 之一: ${[...VALID_CLI_IDS].join(', ')}`,
   );
 }
 

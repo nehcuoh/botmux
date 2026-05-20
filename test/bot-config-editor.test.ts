@@ -173,7 +173,7 @@ describe('resolveCliId', () => {
 
   it('throws on typos so they do not leak into bots.json', () => {
     expect(() => resolveCliId('claud-code')).toThrow(/Unknown CLI 适配器 "claud-code"/);
-    expect(() => resolveCliId('7')).toThrow(/Unknown CLI 适配器 "7"/);
+    expect(() => resolveCliId('99')).toThrow(/Unknown CLI 适配器 "99"/);
   });
 });
 
