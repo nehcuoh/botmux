@@ -313,7 +313,7 @@ botmux autostart enable
 
 | 命令 | 说明 |
 |------|------|
-| `/compact` `/model` `/clear` `/plugin` `/usage` `/code-review` `/security-review` `/review` | 字面送达底层 CLI，交给它的内置 slash 命令处理（例如 Claude Code 的 `/compact`） |
+| `/compact` `/model` `/clear` `/plugin` `/usage` `/context` `/cost` `/mcp` `/diff` `/code-review` `/security-review` `/review` | 字面送达底层 CLI，交给它的内置 slash 命令处理（例如 Claude Code 的 `/compact`、`/context`，Codex 的 `/diff`） |
 
 **⏰ 定时任务**（语法与示例详见 [§ 定时任务管理](#定时任务管理)）
 
