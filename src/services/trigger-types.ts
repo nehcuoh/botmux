@@ -39,6 +39,7 @@ export type TriggerErrorCode =
   | 'daemon_offline'
   | 'dry_run'
   | 'invalid_signature'
+  | 'chat_not_allowed'
   | 'rate_limited'
   | 'replay'
   | 'session_not_found'

@@ -31,6 +31,59 @@ export type TriggerApiDeps = {
   proxyToDaemon: (larkAppId: string, daemonPath: string, init: RequestInit) => Promise<Response>;
 };
 
+export async function dispatchTriggerRequest(
+  body: TriggerRequest,
+  deps: TriggerApiDeps,
+): Promise<{ status: number; body: TriggerResponse }> {
+  if (body.target.kind === 'workflow') {
+    return {
+      status: 501,
+      body: {
+        ok: false,
+        errorCode: 'workflow_trigger_not_implemented',
+        error: 'target.kind=workflow is reserved for the workflow thin layer',
+      },
+    };
+  }
+
+  const botId = body.target.botId;
+  if (!botId) {
+    return {
+      status: 400,
+      body: { ok: false, errorCode: 'target_required', error: 'turn target requires target.botId' },
+    };
+  }
+
+  const upstream = await deps.proxyToDaemon(botId, '/api/trigger', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await upstream.text();
+  let parsed: TriggerResponse;
+  try {
+    parsed = JSON.parse(text) as TriggerResponse;
+  } catch {
+    parsed = {
+      ok: false,
+      triggerId: newTriggerId(),
+      error: `non-json upstream response (${upstream.status})`,
+      errorCode: 'trigger_failed',
+    };
+  }
+
+  appendTriggerLog({
+    triggerId: parsed.triggerId ?? newTriggerId(),
+    connectorId: body.source.connectorId,
+    action: parsed.ok ? (parsed.action ?? 'delivered') : 'failed',
+    status: parsed.ok ? 'ok' : 'error',
+    error: parsed.error,
+    errorCode: parsed.errorCode,
+  });
+
+  return { status: upstream.status, body: parsed };
+}
+
 export async function handleDashboardTriggerApi(
   req: IncomingMessage,
   res: ServerResponse,
@@ -48,45 +101,6 @@ export async function handleDashboardTriggerApi(
   if (!valid.ok) return jsonRes(res, valid.status, valid.body);
 
   const body = valid.request;
-  if (body.target.kind === 'workflow') {
-    return jsonRes(res, 501, {
-      ok: false,
-      errorCode: 'workflow_trigger_not_implemented',
-      error: 'target.kind=workflow is reserved for the workflow thin layer',
-    } satisfies TriggerResponse);
-  }
-
-  const botId = body.target.botId;
-  if (!botId) {
-    return jsonRes(res, 400, { ok: false, errorCode: 'target_required', error: 'turn target requires target.botId' });
-  }
-
-  const upstream = await deps.proxyToDaemon(botId, '/api/trigger', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const text = await upstream.text();
-  try {
-    const parsed = JSON.parse(text) as TriggerResponse;
-    appendTriggerLog({
-      triggerId: parsed.triggerId ?? newTriggerId(),
-      connectorId: body.source.connectorId,
-      action: parsed.ok ? (parsed.action ?? 'delivered') : 'failed',
-      status: parsed.ok ? 'ok' : 'error',
-      error: parsed.error,
-      errorCode: parsed.errorCode,
-    });
-  } catch {
-    appendTriggerLog({
-      triggerId: newTriggerId(),
-      connectorId: body.source.connectorId,
-      action: 'failed',
-      status: 'error',
-      error: `non-json upstream response (${upstream.status})`,
-      errorCode: 'trigger_failed',
-    });
-  }
-  res.writeHead(upstream.status, { 'content-type': 'application/json' });
-  res.end(text);
+  const result = await dispatchTriggerRequest(body, deps);
+  return jsonRes(res, result.status, result.body);
 }

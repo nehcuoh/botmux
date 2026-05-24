@@ -17,6 +17,7 @@ import { pickCreatorForGroup } from './dashboard/operator-selector.js';
 import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
+import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 
@@ -198,6 +199,10 @@ const server = createServer(async (req, res) => {
     // Health probe (no auth) — for pm2
     if (url.pathname === '/__health') {
       return jsonRes(res, 200, { ok: true });
+    }
+
+    if (await handleWebhookRoute(req, res, url, { proxyToDaemon })) {
+      return;
     }
 
     // CLI rotate (HMAC + loopback only) — for `botmux dashboard`
