@@ -110,6 +110,10 @@ export function createWebhookSecret(
   return setWebhookSecret(ref, plaintext, dataDir);
 }
 
+export function generateWebhookSecretPlaintext(): string {
+  return randomBytes(32).toString('base64url');
+}
+
 export function setWebhookSecret(
   ref: string,
   plaintext: string,
