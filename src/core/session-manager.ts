@@ -27,7 +27,7 @@ import { markSessionActivity } from './session-activity.js';
 import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
-import { resolveRoleFile } from './role-resolver.js';
+import { resolveRole } from './role-resolver.js';
 
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
@@ -233,9 +233,10 @@ export function buildNewTopicPrompt(
 
   let roleBlock = '';
   if (opts?.larkAppId && opts?.chatId) {
-    const roleContent = resolveRoleFile(opts.larkAppId, opts.chatId);
+    const { content: roleContent, source: roleSource } = resolveRole(opts.larkAppId, opts.chatId);
     if (roleContent) {
-      roleBlock = `<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`;
+      const ctx = roleSource === 'team' ? 'team' : 'group';
+      roleBlock = `<role context="${ctx}" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`;
     }
   }
 
@@ -309,11 +310,12 @@ export function buildFollowUpContent(
     : '';
   if (attachHint) parts.push(attachHint);
 
-  // Inject per-chat role for follow-up messages (same as buildNewTopicPrompt)
+  // Inject role for follow-up messages: per-chat override ＞ team default (same as buildNewTopicPrompt)
   if (opts?.larkAppId && opts?.chatId) {
-    const roleContent = resolveRoleFile(opts.larkAppId, opts.chatId);
+    const { content: roleContent, source: roleSource } = resolveRole(opts.larkAppId, opts.chatId);
     if (roleContent) {
-      parts.push(`<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`);
+      const ctx = roleSource === 'team' ? 'team' : 'group';
+      parts.push(`<role context="${ctx}" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`);
     }
   }
 
