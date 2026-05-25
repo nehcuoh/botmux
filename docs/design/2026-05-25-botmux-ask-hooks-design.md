@@ -13,12 +13,15 @@
 
 **skill 触发的根本问题**：依赖 agent 肯读 skill、且肯放弃自己**原生的 AskUserQuestion 工具**改调 `botmux ask`。这不可靠——多数 agent 默认用自带的提问工具，skill 抢不过，于是问题根本到不了飞书。
 
-**目标**：把"触发/进料"从 skill 改为 **hook 拦截 agent 原生 askUserQuestion**，做到无需提示词配合、透明自动地把问题送到飞书并把答案送回 CLI。**broker / 卡片 / 答案路由 / 审批人链 / 超时 nonce 等基础设施全部复用，不重写。**
+**目标**：把"触发/进料"从 skill 改为 **hook 拦截 agent 原生 askUserQuestion**，做到无需提示词配合、透明自动地把问题送到飞书并把答案送回 CLI。**进料/回传两端新增，daemon 中段尽量复用**：审批人链、daemon route 骨架、env 注入零改动；broker / card / types 因要完整支持多选 + 多问而做向后兼容的扩展（见 §7），而非另起炉灶。
 
 ### 非目标（本期不做）
 
 - 终端原生 CLI（Kimi / Gemini / Coco / Aiden 等）的答案回传。这些 CLI 的 hook 只能"给出问题"、不能程序化回填，答案必须靠 PTY 键盘注入，可靠性是另一个等级（见 §8）。**本期只做 directive 回填三家，dogfood 通过后再做剩下的。**
-- 多问题（questions[] 长度 > 1）与多选（multiSelect）的完整保真（见 §7 取舍）。
+
+### 本期明确包含
+
+- **多选（multiSelect）与多问题（questions[] 长度 > 1）的完整保真。** 不降级。这要求把 ask 的问答模型从"单问单选、点按钮即答"升级为"N 个问题、每问单选或多选、一次提交"——会扩展 broker / card / types 三个模块（见 §7），但保持对现有 `botmux ask buttons` 单选子命令的向后兼容。
 
 ## 2. 设计原则
 
@@ -71,18 +74,22 @@ agent 调用原生 AskUserQuestion
 
 ### 5.2 per-CLI adapter 归一层（新增 `src/core/ask-hook/<cliId>.ts`）
 
-每个 CLI 一个纯模块，两个纯函数：
+每个 CLI 一个纯模块，两个纯函数（已按多问 + 多选建模）：
 
 ```ts
-// 入：原始 hook payload → 出：botmux 内部问题结构（或 null = 非 askUserQuestion，放行）
-parseQuestion(payload: unknown): { prompt: string; options: AskOption[]; raw: ParsedRaw } | null
+// 内部统一问题结构
+interface AskQuestion { prompt: string; options: AskOption[]; multiSelect: boolean }
 
-// 入：用户选的 key + 原始问题 → 出：该 CLI 的 directive 字符串
-formatAnswer(selectedKey: string, raw: ParsedRaw): string
+// 入：原始 hook payload → 出：问题数组（或 null = 非 askUserQuestion，放行）
+parseQuestions(payload: unknown): { questions: AskQuestion[]; raw: ParsedRaw } | null
+
+// 入：每问选中的 key（单选 1 个、多选 ≥0 个）+ 原始 payload → 出：该 CLI 的 directive 字符串
+// answersByQuestion[i] 对应 questions[i] 选中的 key 数组
+formatAnswer(answersByQuestion: string[][], raw: ParsedRaw): string
 ```
 
 - `claude-code.ts`、`codex.ts`、`opencode.ts` 三份。
-- 纯函数、无 IO，便于单测（对照各 CLI 真实 payload 样本）。
+- 纯函数、无 IO，便于单测（对照各 CLI 真实 payload 样本，含多问 / 多选样本）。
 - 通过 `src/core/ask-hook/registry.ts` 按 cliId 分发。
 
 ### 5.3 hook 安装：`ensureHooks(cliId, adapter)`（新增 `src/adapters/hook-installer.ts`）
@@ -92,9 +99,15 @@ formatAnswer(selectedKey: string, raw: ParsedRaw): string
 - 幂等：内容不变不写（对齐 `ensureSkills` 行为）。
 - 把对应 CLI 的 hook 配置写好，命令指向 `botmux hook <cliId>`。
 
-### 5.4 复用（零改动）
+### 5.4 复用与扩展
 
-`ask-broker.ts`、`ask-card.ts`、`ask-api.ts`、`card-handler.ts`、daemon `/api/asks` route、worker `BOTMUX_*` env 注入（worker.ts:2663）—— 全部保持原样。
+**零改动复用**：`ask-api.ts`（审批人链）、daemon `/api/asks` route 的鉴权/审批/广播骨架、worker `BOTMUX_*` env 注入（worker.ts:2663）。
+
+**需向后兼容地扩展**（因多选 + 多问，见 §7）：
+- `ask-types.ts`：问答模型从"单问 + 扁平 options + 单选"扩为"questions[]、每问 single/multi"；`AskResult.selected` 从 `string` 扩为按问题分组的 `string[][]`。保留旧单选形态的兼容映射，`botmux ask buttons` 子命令与其现有测试不破。
+- `ask-broker.ts`：`tryResolveAsk` 从"首次有效点击即 settle"改为"累积每问的勾选态、收到 Submit 才 settle"；单选问题仍可点击即记。
+- `ask-card.ts`：从"按钮即答"升级为"每问渲染选项（单选=单选钮语义、多选=可勾选）+ 一个 Submit 按钮"，settle 时 PATCH 成终态。
+- `card-handler.ts`：区分 toggle（记录勾选，不 settle）与 submit（收口 settle）两类动作。
 
 ### 5.5 退役 `ASK_SKILL`
 
@@ -105,14 +118,21 @@ formatAnswer(selectedKey: string, raw: ParsedRaw): string
 
 hook 客户端运行在 CLI 子进程里，自动继承 worker 注入的 `BOTMUX_SESSION_ID` / `BOTMUX_CHAT_ID` / `BOTMUX_LARK_APP_ID` / `BOTMUX_ROOT_MESSAGE_ID`（worker.ts:2663 现已注入），与 `botmux ask` 同源，无需新增注入。
 
-## 7. askUserQuestion 保真度取舍（需评审确认）
+## 7. 问答模型：完整支持多问 + 多选
 
-原生 askUserQuestion 是 `questions[]`（可能多问）、每问 `options[]`、可能 `multiSelect: true`；而现有 `ask-broker` / `ask-card` 模型是**单问 + 扁平 options + 单选按钮**。
+原生 askUserQuestion 是 `questions[]`（可能多问）、每问 `options[]`、可能 `multiSelect: true`；而现有 `ask-broker` / `ask-card` 模型是**单问 + 扁平 options + 单选按钮**。本期**不降级**，把模型升级为原生匹配的通用形态：
 
-**本期取舍（MVP）**：
-- 只处理 `questions[0]`，单选。覆盖绝大多数实际用法（典型为 1 问 ≤4 选、单选）。
-- `multiSelect: true` 或 `questions.length > 1`：MVP 先**降级为取首问、单选**，并在卡片上标注；adapter 的 `parseQuestion` 保留完整 raw 数据，为后续扩展留口。
-- 完整多问 / 多选支持列为 fast-follow（需扩 `ask-types` / `ask-card` / broker 的选择模型），不阻塞本期 dogfood。
+**统一模型：N 个问题 × 每问单选或多选 × 一次提交。**
+
+- 卡片渲染 `questions[]` 的每个问题为一个分区，分区内列出该问的选项：
+  - 单选问题：选项互斥，点一个即记为该问的答案。
+  - 多选问题：选项可勾选/取消，允许选多个（含 0 个，若该 CLI 语义允许）。
+- 卡片底部一个 **Submit** 按钮；用户调好所有问题的勾选后点 Submit，broker 才 settle，一次性收集全部答案。
+- 这一模型是 multiSelect 与多问的超集：单问单选是它的退化特例，因此**现有 `botmux ask buttons` 单选语义作为特例继续工作**（向后兼容）。
+
+**连带改动**（详见 §5.4）：`ask-types`（结果结构按问分组 `string[][]`）、`ask-broker`（累积勾选 + Submit 才 settle）、`ask-card`（勾选 + Submit 卡片）、`card-handler`（toggle / submit 两类动作）。`ask-api` 审批链、daemon route 骨架不变。
+
+**向后兼容要求**：扩展 `AskResult` / broker 行为时，保留旧单选形态的映射，`botmux ask` 子命令及其现有测试零回归。
 
 ## 8. 范围与分期
 
@@ -136,13 +156,15 @@ hook 客户端必须保证：**任何异常都不能让 agent 永久阻塞**。
 
 ## 11. 测试策略
 
-- adapter 纯函数单测：对照三家真实 hook payload 样本，测 `parseQuestion`（含非 askUserQuestion 放行、multiSelect 降级）与 `formatAnswer`（directive 形状）。
+- adapter 纯函数单测：对照三家真实 hook payload 样本，测 `parseQuestions`（含非 askUserQuestion 放行、单问单选、多选、多问多组）与 `formatAnswer`（含多选/多问的 directive 形状）。
+- broker 扩展单测：累积勾选、单选即记、Submit 才 settle、多问全收集、超时/失效路径；并补 toggle/submit 的抢答与 nonce 用例。
+- 向后兼容回归：现有 `ask-broker` / `ask-card` / `ask-api` 测试与 `botmux ask buttons` 单选语义零回归。
 - hook 客户端：mock daemon `/api/asks`，测正常回填、超时、daemon 不可达三条降级路径。
-- 复用既有 `ask-broker` / `ask-card` / `ask-api` 测试，确认零回归。
-- dogfood：三家真实 CLI 各跑一次原生提问，飞书点选，确认答案正确进 CLI。
+- dogfood：三家真实 CLI 各跑一次原生提问（含一个多选/多问场景），飞书点选 Submit，确认答案正确进 CLI。
 
 ## 12. 风险与未决
 
 - 各 CLI hook 配置格式 / directive 形状会随上游版本变动——需实测当前版本，并考虑版本门控（对齐桌面端经验）。
-- multiSelect / 多问降级的用户体验是否可接受，待评审。
+- broker 从"点击即 settle"改为"Submit 才 settle"是行为变更：需确保 `botmux ask` 子命令的旧单选语义与测试零回归（兼容映射）。
+- 多选/多问卡片的飞书交互形态（勾选组 + Submit）需确认在飞书互动卡片能力内可实现且体验可接受。
 - 去重策略（§10）的具体实现位置待落实现细节时确认。
