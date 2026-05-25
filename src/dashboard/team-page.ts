@@ -193,7 +193,13 @@ function renderRoster(){
   document.querySelectorAll('tr.grp').forEach(tr => {
     tr.onclick = () => {
       const gid = tr.dataset.g, collapsed = tr.dataset.collapsed === '1';
-      document.querySelectorAll('tr[data-rowg="'+gid+'"]').forEach(r => { r.style.display = collapsed ? '' : 'none'; });
+      const rows = document.querySelectorAll('tr[data-rowg="'+gid+'"]');
+      rows.forEach(r => { r.style.display = collapsed ? '' : 'none'; });
+      if (!collapsed) {
+        // collapsing hides rows → deselect them (hidden ⇒ never submitted, same rule as filtering)
+        rows.forEach(r => { const cb = r.querySelector('.botpick'); if (cb) { if (cb.checked) picked.delete(cb.dataset.app); cb.checked = false; } });
+        updateRosterCount(f.length);
+      }
       tr.dataset.collapsed = collapsed ? '' : '1';
       const bEl = tr.querySelector('b'); bEl.textContent = (collapsed ? '▾ ' : '▸ ') + bEl.textContent.slice(2);
     };
@@ -305,9 +311,12 @@ $('btn-claim').onclick = async () => {
   const apps = [...picked];
   $('grp-out').classList.remove('hide');
   if (apps.length === 0) { $('grp-out').innerHTML = '<span class="err">请先勾选要归到自己名下的机器人</span>'; return; }
-  for (const app of apps) await fetch('/api/team/bots/' + encodeURIComponent(app) + '/owner', { method: 'POST' });
+  let fail = 0;
+  for (const app of apps) { const r = await fetch('/api/team/bots/' + encodeURIComponent(app) + '/owner', { method: 'POST' }); if (!r.ok) fail++; }
   picked.clear();
-  $('grp-out').innerHTML = '<span class="ok">已把 ' + apps.length + ' 个机器人归到你名下</span>';
+  $('grp-out').innerHTML = fail
+    ? '<span class="err">' + (apps.length - fail) + ' 个成功，' + fail + ' 个失败（可能会话过期，请刷新重登）</span>'
+    : '<span class="ok">已把 ' + apps.length + ' 个机器人归到你名下</span>';
   await showApp(); // refetch → re-group by owner
 };
 $('btn-group').onclick = async () => {
