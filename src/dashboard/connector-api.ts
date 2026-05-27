@@ -91,7 +91,6 @@ function normalizeConnectorInput(
   const body = record(raw);
   const c = record(body.connector ?? body);
   const prior = opts.prior ?? null;
-  const source = record(c.source ?? prior?.source);
   const verify = record(c.verify ?? prior?.verify);
   const target = record(c.target ?? prior?.target);
   const promptEnvelope = record(c.promptEnvelope ?? prior?.promptEnvelope);
@@ -101,11 +100,6 @@ function normalizeConnectorInput(
   const id = opts.id ?? (typeof c.id === 'string' && c.id.trim() ? c.id.trim() : prior?.id ?? newConnectorId());
   const name = typeof c.name === 'string' && c.name.trim() ? c.name.trim() : prior?.name;
   if (!name) return { ok: false, error: 'name_required' };
-
-  const sourceType = typeof source.type === 'string' ? source.type : prior?.source.type ?? 'generic';
-  if (!['generic', 'argos', 'meego', 'prometheus', 'github'].includes(sourceType)) {
-    return { ok: false, error: 'bad_source_type' };
-  }
 
   const targetMode = typeof target.mode === 'string' ? target.mode : prior?.target.mode ?? 'dynamic';
   if (!['dynamic', 'fixed', 'new-group'].includes(targetMode)) return { ok: false, error: 'bad_target_mode' };
@@ -137,12 +131,6 @@ function normalizeConnectorInput(
     id,
     name,
     enabled: bool(c.enabled, prior?.enabled ?? true),
-    source: {
-      type: sourceType as ConnectorDefinition['source']['type'],
-      ...(typeof source.displayName === 'string' && source.displayName.trim()
-        ? { displayName: source.displayName.trim() }
-        : prior?.source.displayName ? { displayName: prior.source.displayName } : {}),
-    },
     verify: {
       type: 'hmac-sha256',
       secretRef,

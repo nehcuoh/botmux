@@ -7,6 +7,7 @@ import { renderGroupsPage } from './groups.js';
 import { renderBotDefaultsPage } from './bot-defaults.js';
 import { renderRolesPage } from './roles.js';
 import { renderTeamFederationPage } from './team-federation.js';
+import { renderConnectorsPage } from './connectors.js';
 import { renderWorkflowsPage } from './workflows.js';
 import { renderWorkflowCatalogPage } from './workflow-catalog.js';
 import { wireBotOnboardingButton } from './bot-onboarding.js';
@@ -35,6 +36,7 @@ function route() {
   } else if (hash.startsWith('#/workflows')) pageDispose = renderWorkflowsPage(root);
   else if (hash.startsWith('#/groups')) renderGroupsPage(root);
   else if (hash.startsWith('#/bot-defaults')) renderBotDefaultsPage(root);
+  else if (hash.startsWith('#/connectors')) renderConnectorsPage(root);
   else if (hash.startsWith('#/team')) renderTeamFederationPage(root);
   else if (hash.startsWith('#/roles')) renderRolesPage(root);
   else if (hash.startsWith('#/schedules')) renderSchedulesPage(root);

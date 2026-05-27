@@ -17,7 +17,6 @@ function sample(id = 'conn_test'): ConnectorDefinition {
     id,
     name: 'Generic alerts',
     enabled: true,
-    source: { type: 'generic', displayName: 'Generic' },
     verify: {
       type: 'hmac-sha256',
       secretRef: 'whsec_test',

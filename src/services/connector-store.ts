@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 
-export type ConnectorSourceType = 'generic' | 'argos' | 'meego' | 'prometheus' | 'github';
 export type ConnectorVerifyType = 'hmac-sha256';
 export type ConnectorTargetMode = 'dynamic' | 'fixed' | 'new-group';
 export type ConnectorTargetKind = 'turn' | 'workflow';
@@ -12,10 +11,8 @@ export interface ConnectorDefinition {
   id: string;
   name: string;
   enabled: boolean;
-  source: {
-    type: ConnectorSourceType;
-    displayName?: string;
-  };
+  // (No "source type" — all webhook sources are treated uniformly. The human
+  // label is promptEnvelope.sourceName.)
   verify: {
     type: ConnectorVerifyType;
     secretRef: string;
