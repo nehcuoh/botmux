@@ -7,7 +7,7 @@ import { execSync } from 'node:child_process';
 import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
-import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard } from './client.js';
+import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard, getMessageDetail } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent } from './card-builder.js';
 import { addChatGrant, addGlobalGrant } from '../../services/grant-store.js';
 import { checkNonce, clearPending, markDenied } from './grant-pending.js';
@@ -176,8 +176,26 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // 这两步失败不回滚授权（已落库），仅记日志，并兜底用 in-place patch 让 owner 看到结果。
     if (cardMessageId) {
       // 通知是 best-effort（@被授权人）；失败不影响主流程，只记日志。
+      //
+      // reply_in_thread 只在「卡片本身已处于话题里」时才开：
+      //   - 话题群 / 普通群内话题 → 卡片有 thread_id → 线程化回复，落进原话题；
+      //   - 普通群顶层消息       → 卡片无 thread_id → reply_in_thread 会凭空开一个
+      //                            新话题（用户不想要），改为普通回复直接落到群里。
+      // thread_id 是「是否真的在话题里」的权威信号（见 event-dispatcher.decideRouting）。
+      // 探测失败时退回线程化回复，保持话题群下的原有行为。
+      let replyInThread = true;
       try {
-        await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc), 'interactive', true);
+        const detail = await getMessageDetail(larkAppId, cardMessageId);
+        const item = detail?.items?.[0];
+        // 拿不到 message item 视为探测失败（走 catch 退回 true），而不是误判成
+        // 「无 thread_id → 普通回复」——后者会在话题群里破坏原有的线程化行为。
+        if (!item) throw new Error('no message item in getMessageDetail response');
+        replyInThread = Boolean(item.thread_id);
+      } catch (err) {
+        logger.debug(`grant notify thread-mode probe failed, defaulting to thread reply: ${err}`);
+      }
+      try {
+        await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc), 'interactive', replyInThread);
       } catch (err) {
         logger.warn(`grant notify failed (grant still applied): ${err}`);
       }

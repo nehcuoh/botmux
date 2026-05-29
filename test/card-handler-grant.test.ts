@@ -14,9 +14,16 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 const replyMock = vi.fn(async () => 'om_notify');
 const deleteMock = vi.fn(async () => true);  // deleteMessage now returns boolean (success)
+// 默认：卡片处于话题里（有 thread_id）→ 线程化回复。单测可 mockResolvedValueOnce 改写。
+const getMessageDetailMock = vi.fn(async () => ({ items: [{ thread_id: 'omt_thread' }] }));
 vi.mock('../src/im/lark/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
-  return { ...actual, replyMessage: (...a: any[]) => replyMock(...a), deleteMessage: (...a: any[]) => deleteMock(...a) };
+  return {
+    ...actual,
+    replyMessage: (...a: any[]) => replyMock(...a),
+    deleteMessage: (...a: any[]) => deleteMock(...a),
+    getMessageDetail: (...a: any[]) => getMessageDetailMock(...a),
+  };
 });
 
 let configPath: string;
@@ -39,6 +46,7 @@ function action(a: string, extra: Record<string, any> = {}, openMsgId?: string) 
 
 beforeEach(() => {
   replyMock.mockClear(); deleteMock.mockClear(); deleteMock.mockImplementation(async () => true);
+  getMessageDetailMock.mockClear(); getMessageDetailMock.mockImplementation(async () => ({ items: [{ thread_id: 'omt_thread' }] }));
   const dir = mkdtempSync(join(tmpdir(), 'botmux-cardgrant-'));
   configPath = join(dir, 'bots.json');
   writeFileSync(configPath, JSON.stringify([{ larkAppId: 'h1', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['ou_owner'] }], null, 2));
@@ -71,6 +79,39 @@ describe('card-handler grant actions', () => {
     expect(deleteMock).toHaveBeenCalledWith('h1', 'om_card');
     expect(registry.getBot('h1').config.chatGrants).toEqual({ oc_1: ['ou_g'] });
     expect(pending.checkNonce('h1', 'oc_1', 'ou_g', nonce)).toBe(false);
+  });
+
+  it('卡片在话题里（有 thread_id）→ 线程化回复（reply_in_thread=true）', async () => {
+    const { pending, handler } = await fresh();
+    getMessageDetailMock.mockResolvedValueOnce({ items: [{ thread_id: 'omt_topic' }] });
+    const nonce = pending.openPending('h1', 'oc_1', 'ou_g');
+    await handler.handleCardAction(action('grant_chat', { nonce }, 'om_card'), deps, 'h1');
+    expect(getMessageDetailMock).toHaveBeenCalledWith('h1', 'om_card');
+    expect(replyMock).toHaveBeenCalledWith('h1', 'om_card', expect.stringContaining('ou_g'), 'interactive', true);
+  });
+
+  it('普通群顶层消息（无 thread_id）→ 普通回复落到群里（reply_in_thread=false，不开新话题）', async () => {
+    const { pending, handler } = await fresh();
+    getMessageDetailMock.mockResolvedValueOnce({ items: [{}] });  // 无 thread_id
+    const nonce = pending.openPending('h1', 'oc_1', 'ou_g');
+    await handler.handleCardAction(action('grant_chat', { nonce }, 'om_card'), deps, 'h1');
+    expect(replyMock).toHaveBeenCalledWith('h1', 'om_card', expect.stringContaining('ou_g'), 'interactive', false);
+  });
+
+  it('thread_id 探测失败（API 抛错）→ 退回线程化回复（reply_in_thread=true）', async () => {
+    const { pending, handler } = await fresh();
+    getMessageDetailMock.mockRejectedValueOnce(new Error('lark 500'));
+    const nonce = pending.openPending('h1', 'oc_1', 'ou_g');
+    await handler.handleCardAction(action('grant_chat', { nonce }, 'om_card'), deps, 'h1');
+    expect(replyMock).toHaveBeenCalledWith('h1', 'om_card', expect.stringContaining('ou_g'), 'interactive', true);
+  });
+
+  it('detail.items 为空 → 视为探测失败，退回线程化回复（不误判成普通回复）', async () => {
+    const { pending, handler } = await fresh();
+    getMessageDetailMock.mockResolvedValueOnce({ items: [] });
+    const nonce = pending.openPending('h1', 'oc_1', 'ou_g');
+    await handler.handleCardAction(action('grant_chat', { nonce }, 'om_card'), deps, 'h1');
+    expect(replyMock).toHaveBeenCalledWith('h1', 'om_card', expect.stringContaining('ou_g'), 'interactive', true);
   });
 
   it('owner grant_chat WITHOUT card id → fallback in-place card patch, persists', async () => {
