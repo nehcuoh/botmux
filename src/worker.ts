@@ -3723,7 +3723,14 @@ process.on('message', async (raw: unknown) => {
         break;
       }
       log('Restart requested');
-      backend?.kill();
+      // Must destroySession(), not kill(): for persistent backends (tmux/herdr)
+      // kill() only detaches — the backing session + CLI process keep running,
+      // so the resume:true spawnCli below would re-attach to the SAME live CLI
+      // (selectSessionBackend reattaches whenever hasSession() is true) and the
+      // process would never actually restart. destroySession() tears the session
+      // down so the respawn starts a fresh CLI. (PTY has no destroySession, so
+      // the ?. no-ops and killCli()'s kill() does the teardown.)
+      backend?.destroySession?.();
       killCli();
       awaitingFirstPrompt = true;
       setTimeout(() => {

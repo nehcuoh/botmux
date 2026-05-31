@@ -30,7 +30,7 @@ describe('selectSessionBackend', () => {
   it('uses owned pipe backend when reattaching to an existing tmux session', () => {
     vi.mocked(TmuxBackend.hasSession).mockReturnValue(true);
 
-    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', useTmux: true });
+    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', backendType: 'tmux' });
 
     expect(selected.isTmuxMode).toBe(true);
     expect(selected.isPipeMode).toBe(true);
@@ -42,7 +42,7 @@ describe('selectSessionBackend', () => {
   it('uses managed pipe backend for a new tmux session', () => {
     vi.mocked(TmuxBackend.hasSession).mockReturnValue(false);
 
-    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', useTmux: true });
+    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', backendType: 'tmux' });
 
     expect(selected.isTmuxMode).toBe(true);
     expect(selected.isPipeMode).toBe(true);
@@ -52,7 +52,7 @@ describe('selectSessionBackend', () => {
   });
 
   it('uses pty backend when tmux is disabled', () => {
-    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', useTmux: false });
+    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', backendType: 'pty' });
 
     expect(selected.isTmuxMode).toBe(false);
     expect(selected.isPipeMode).toBe(false);
