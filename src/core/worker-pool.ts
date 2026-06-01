@@ -1973,9 +1973,13 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     bridgeJsonlPath,
     // PID + cwd: claude uses for `~/.claude/sessions/<pid>.json` resolver;
     // codex uses for `/proc/<pid>/fd` rollout discovery (works even if
-    // session-discovery couldn't probe sessionId up-front).
-    adoptCliPid: (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.originalCliPid : undefined,
-    adoptCwd: (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.cwd : undefined,
+    // session-discovery couldn't probe sessionId up-front). zellij adopt ALSO
+    // needs the pid unconditionally: ZellijObserveBackend's liveness watches
+    // the CLI pid (process.kill(pid,0)) so the worker onExit's when a user-typed
+    // CLI exits back to a shell — without it, aiden/gemini/opencode/hermes would
+    // fall back to pane-only liveness and keep routing input into the shell.
+    adoptCliPid: (adoptedCliId === 'claude-code' || isStructuredBridge || !!adopted.zellijPaneId) ? adopted.originalCliPid : undefined,
+    adoptCwd: (adoptedCliId === 'claude-code' || isStructuredBridge || !!adopted.zellijPaneId) ? adopted.cwd : undefined,
     // Restored-from-metadata: this fork is recreating an /adopt session after
     // a daemon restart, NOT a fresh /adopt command. The Lark thread already
     // has every prior turn pushed as cards, so the worker should skip the
