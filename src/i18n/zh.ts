@@ -399,7 +399,7 @@ export const messages: Record<string, string> = {
   'card.action.retry_last_task_not_ready': '⚠️ 当前仍在限额中，请在 {retryLabel} 后再试。',
 
   // ─── Worker → daemon notices ─────────────────────────────────────────────
-  'worker.adopted_session_exited': '⏏ 已采纳的 CLI 会话已退出',
+  'worker.adopted_session_exited': '⏏ /adopt的 CLI 会话已退出',
   'worker.crash_loop_stopped': '⚠️ {cliName} 在 1 分钟内崩溃 {count} 次，已停止自动重启。发消息可触发重新启动。',
 
   // ─── CLI setup wizard / pm2 lifecycle (no per-bot context) ───────────────
