@@ -62,6 +62,7 @@ import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText } from './utils/transient-snapshot.js';
+import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
 import { redactChildEnv } from './utils/child-env.js';
@@ -3202,9 +3203,20 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
           }
         });
       } else {
-        // ── Non-tmux mode: shared scrollback relay ──
-        if (scrollback.length > 0) {
-          ws.send(scrollback);
+        // ── Shared relay (PtyBackend OR tmux pipe mode) ──
+        // History seed: prefer tmux's authoritative capture-pane in pipe mode
+        // (clean grid + scrollback) over replaying the raw cumulative byte
+        // stream, which scrolls stale Ink redraw/spinner frames into scrollback
+        // at any size mismatch and produces the stacked-footer history garble.
+        // See chooseWebTerminalSeed for the full rationale.
+        const seed = chooseWebTerminalSeed({
+          canCapture: isPipeMode && backend instanceof TmuxPipeBackend,
+          capture: () => (backend as TmuxPipeBackend).captureCurrentScreen(),
+          scrollback,
+          onError: log,
+        });
+        if (seed.length > 0) {
+          ws.send(seed);
         }
 
         ws.on('message', (raw) => {
