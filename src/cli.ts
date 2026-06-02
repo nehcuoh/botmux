@@ -2863,7 +2863,17 @@ async function cmdSend(rest: string[]): Promise<void> {
       const out = await synthesizeVoiceOpus(appId, content);
       dir = out.dir;
       const fileKey = await uploadFile(appId, out.path, { duration: out.durationMs });
+      const sentAtMs = Date.now();
       const messageId = await sendAudio(fileKey);
+      // 语音也是一次回复：写 bridge fallback marker，否则本轮会被判为"没发 botmux send"
+      // 而触发兜底，多补一张文本卡。与文本/卡片路径同口径：仅同话题回复才记。
+      if (!sendTopLevel && !overrideChatId && !sendInto) {
+        try {
+          const markerDir = join(resolveDataDir(), 'turn-sends');
+          if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
+          appendFileSync(join(markerDir, `${sid}.jsonl`), JSON.stringify({ sentAtMs, messageId }) + '\n');
+        } catch { /* best-effort：漏记只多一条兜底，不致命 */ }
+      }
       console.error(`✓ 已发送语音 ${messageId} ｜ ${Math.round(out.durationMs / 1000)}s`);
       console.log(JSON.stringify({ success: true, messageId, sessionId: sid, kind: 'voice', durationMs: out.durationMs }));
     } catch (e: any) {
