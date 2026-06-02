@@ -193,8 +193,11 @@ describe('TmuxPipeBackend.captureCurrentScreen', () => {
       .mockReturnValueOnce('0\n' as any)  // alternate_on probe
       .mockReturnValueOnce('line1\nline2\nline3\n' as any);
     const out = be.captureCurrentScreen();
-    // Each \n must become \r\n; existing \r\n must not be doubled.
-    expect(out).toBe('line1\r\nline2\r\nline3\r\n');
+    // Each \n must become \r\n; existing \r\n must not be doubled. The web seed
+    // also strips the trailing newline (see composeSeedBody) so it doesn't
+    // scroll the receiving xterm a row past the content. Cursor query is mocked
+    // empty here → no CUP appended.
+    expect(out).toBe('line1\r\nline2\r\nline3');
   });
 
   it('preserves existing \\r\\n untouched', () => {
@@ -205,7 +208,8 @@ describe('TmuxPipeBackend.captureCurrentScreen', () => {
     mockedExecSync
       .mockReturnValueOnce('0\n' as any)
       .mockReturnValueOnce('a\r\nb\nc\r\n' as any);
-    expect(be.captureCurrentScreen()).toBe('a\r\nb\r\nc\r\n');
+    // \r\n preserved; trailing newline stripped for the seed.
+    expect(be.captureCurrentScreen()).toBe('a\r\nb\r\nc');
   });
 
   it('prefixes alt-buffer enter sequence when pane is in alt screen', () => {
@@ -217,9 +221,10 @@ describe('TmuxPipeBackend.captureCurrentScreen', () => {
       .mockReturnValueOnce('1\n' as any)        // alternate_on=1 (Claude TUI)
       .mockReturnValueOnce('claude prompt\n' as any);
     const out = be.captureCurrentScreen();
-    // Must start with: enter alt buffer + home + clear, then the snapshot.
+    // Must start with: enter alt buffer + home + clear, then the snapshot
+    // (trailing newline stripped for the seed; cursor query mocked empty).
     expect(out.startsWith('\x1b[?1049h\x1b[H\x1b[2J')).toBe(true);
-    expect(out.endsWith('claude prompt\r\n')).toBe(true);
+    expect(out.endsWith('claude prompt')).toBe(true);
   });
 
   it('does NOT prefix alt-buffer enter when pane is on main buffer', () => {
@@ -231,8 +236,22 @@ describe('TmuxPipeBackend.captureCurrentScreen', () => {
       .mockReturnValueOnce('0\n' as any)        // alternate_on=0 (zsh prompt)
       .mockReturnValueOnce('$ ls\n' as any);
     const out = be.captureCurrentScreen();
-    expect(out).toBe('$ ls\r\n');
+    expect(out).toBe('$ ls');                   // trailing newline stripped
     expect(out).not.toContain('\x1b[?1049h');
+  });
+
+  it('restores the pane cursor (CUP) so the live redraw lands on the right row', () => {
+    const be = new TmuxPipeBackend('0:2.0');
+    be.spawn('', [], spawnOpts());
+    mockedExecSync.mockReset();
+    mockedExecSync.mockReturnValue(Buffer.from('') as any);
+    mockedExecSync
+      .mockReturnValueOnce('0\n' as any)          // alternate_on=0 (main buffer)
+      .mockReturnValueOnce('STATUS\nTIP\nINPUT\n' as any)  // capture-pane
+      .mockReturnValueOnce('6 10\n' as any);      // cursor_x=6 cursor_y=10
+    const out = be.captureCurrentScreen();
+    // Trailing newline stripped, then CUP to (y+1=11, x+1=7).
+    expect(out).toBe('STATUS\r\nTIP\r\nINPUT\x1b[11;7H');
   });
 });
 

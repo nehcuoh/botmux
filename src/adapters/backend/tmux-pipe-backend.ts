@@ -45,6 +45,36 @@ export function normaliseCaptureLineEndings(s: string): string {
   return s.replace(/\r?\n/g, '\r\n');
 }
 
+/**
+ * Compose the web-terminal seed body from a normalised capture-pane snapshot
+ * and the pane's cursor position.
+ *
+ * The receiving xterm replays this body and then resumes the LIVE pipe-pane
+ * byte stream. Claude Code (and other Ink TUIs) repaint their bottom block with
+ * height-RELATIVE moves (`\x1b[<n>A` + `\r\n`), so the FIRST live redraw assumes
+ * the cursor sits exactly where the pane's cursor is. Raw capture-pane output
+ * carries no cursor position and ends with a trailing newline — that newline
+ * scrolls the receiving grid one row PAST the content (desyncing the viewport
+ * from the app's coordinates) and parks the cursor on the bottom row instead of
+ * the app's real row. The first relative redraw then lands a row low, and
+ * because the CLI tracks position relatively, every subsequent frame stays
+ * shifted (the status-line update bleeds into the line below — the bug 申晗
+ * reported).
+ *
+ * Fix: strip the trailing newline(s) so no extra scroll happens, then restore
+ * the cursor with CUP (`\x1b[row;colH`). CUP is viewport-relative and tmux's
+ * `cursor_x`/`cursor_y` are 0-based viewport coordinates, so +1 each lands
+ * correctly even when the capture includes full scrollback. Exported for tests.
+ */
+export function composeSeedBody(
+  normalisedCapture: string,
+  cursor: { x: number; y: number } | null,
+): string {
+  const body = normalisedCapture.replace(/(\r\n)+$/, '');
+  if (!cursor) return body;
+  return body + `\x1b[${cursor.y + 1};${cursor.x + 1}H`;
+}
+
 export class TmuxPipeBackend implements SessionBackend {
   /** Real tmux pane address (e.g. "0:2.0") or botmux session name (bmx-*). */
   private readonly paneTarget: string;
@@ -482,7 +512,7 @@ export class TmuxPipeBackend implements SessionBackend {
    *  makes the snapshot render correctly. The live pipe-pane stream itself
    *  doesn't need this fix — applications write proper `\r\n`. */
   captureCurrentScreen(): string {
-    return this.captureWithBounds('-S - -E -');
+    return this.captureWithBounds('-S - -E -', { restoreCursor: true });
   }
 
   /** Snapshot ONLY the currently visible pane (no scrollback). Equivalent to
@@ -496,7 +526,7 @@ export class TmuxPipeBackend implements SessionBackend {
     return this.captureWithBounds('');
   }
 
-  private captureWithBounds(bounds: string): string {
+  private captureWithBounds(bounds: string, opts?: { restoreCursor?: boolean }): string {
     if (this.exited) return '';
     try {
       const altOn = this.isPaneInAltBuffer();
@@ -506,6 +536,10 @@ export class TmuxPipeBackend implements SessionBackend {
         { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000, maxBuffer: 16 * 1024 * 1024, env: tmuxEnv() },
       );
       const normalised = normaliseCaptureLineEndings(raw);
+      const body = opts?.restoreCursor
+        ? composeSeedBody(normalised, this.getCursorPosition())
+        : normalised;
+
       if (altOn) {
         // The pane's CLI (e.g. Claude Code, vim) is in the alternate screen
         // buffer. capture-pane returns the alt-buffer's content but no
@@ -513,11 +547,29 @@ export class TmuxPipeBackend implements SessionBackend {
         // with `enter alt screen + home + clear` so xterm.js renders it in
         // the alt buffer instead of leaking it into the main buffer where
         // it would persist after the application exits.
-        return `\x1b[?1049h\x1b[H\x1b[2J${normalised}`;
+        return `\x1b[?1049h\x1b[H\x1b[2J${body}`;
       }
-      return normalised;
+      return body;
     } catch {
       return '';
+    }
+  }
+
+  /** Current pane cursor position (0-based, viewport-relative — matches xterm
+   *  CUP semantics). Used to restore the cursor in the web-terminal seed so the
+   *  CLI's first height-relative redraw lands on the right row. */
+  private getCursorPosition(): { x: number; y: number } | null {
+    if (this.exited) return null;
+    try {
+      const out = execSync(
+        `tmux display-message -p -t ${shellescape(this.paneTarget)} '#{cursor_x} #{cursor_y}'`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000, env: tmuxEnv() },
+      ).trim();
+      const [x, y] = out.split(/\s+/).map(s => parseInt(s, 10));
+      if (Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0) return { x, y };
+      return null;
+    } catch {
+      return null;
     }
   }
 
