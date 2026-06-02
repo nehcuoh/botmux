@@ -4505,13 +4505,14 @@ async function cmdPresetExport(rest: string[]): Promise<void> {
       process.exit(1);
       return;
     }
-    if (teamRole) {
-      console.error('\n即将导出以下角色内容，请确认不含敏感/内部信息：');
+    if (teamRole || capability) {
+      console.error('\n即将导出以下内容，请确认不含敏感/内部信息：');
       console.error('────────────────────────────────────────');
-      console.error(teamRole);
+      if (teamRole) console.error(`[角色 teamRole]\n${teamRole}`);
+      if (capability) console.error(`[能力标签 capability] ${capability}`);
       console.error('────────────────────────────────────────');
     } else {
-      console.error('\n（无角色内容，仅导出 cliId/model/capability）');
+      console.error('\n（无角色 / 能力标签内容，仅导出 cliId/model）');
     }
     // Prompt on stderr so a piped stdout (--out -) stays clean.
     const rl = createInterface({ input: process.stdin, output: process.stderr });
