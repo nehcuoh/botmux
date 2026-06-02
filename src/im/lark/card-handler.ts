@@ -1207,14 +1207,26 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     async function resolveAdoptTarget() {
       if (selected.zellijPaneId) {
         const { discoverAdoptableZellijSessions } = await import('../../core/zellij-adopt-discovery.js');
+        // Match by (session, paneId) only — a paneId uniquely identifies the
+        // pane within a session, and the resolved CLI pid can legitimately
+        // differ from the card's snapshot (wrapper⇄native pid shift), so
+        // requiring an exact pid match would spuriously report 已退出. Use the
+        // freshly-discovered entry (with its current pid).
         return discoverAdoptableZellijSessions(botCfg.cliId)
-          .find(s => s.zellijSession === selected.zellijSession && s.zellijPaneId === selected.zellijPaneId && s.cliPid === selected.cliPid);
+          .find(s => s.zellijSession === selected.zellijSession && s.zellijPaneId === selected.zellijPaneId);
       }
       const { discoverAdoptableSessions } = await import('../../core/session-discovery.js');
       return discoverAdoptableSessions(botCfg.cliId)
         .find(s => s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
     }
+    // Discovery scans a live process tree and can transiently miss a pane under
+    // load (a racing `ps` snapshot); retry a few times before giving up so a
+    // momentary miss doesn't surface as "目标 CLI 会话已退出".
     target = await resolveAdoptTarget();
+    for (let attempt = 0; !target && attempt < 3; attempt++) {
+      await new Promise(r => setTimeout(r, 150));
+      target = await resolveAdoptTarget();
+    }
     if (!target) {
       await sessionReply(rootId, t('cmd.adopt.target_exited', undefined, localeForBot(ds.larkAppId)));
       if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
