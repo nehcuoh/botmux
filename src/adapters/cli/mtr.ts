@@ -28,10 +28,14 @@ function nativeSessionId(sessionId: string, cliSessionId?: string): string {
 }
 
 export function createMtrAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'mtr');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'mtr';
+  let cachedBin: string | undefined;
   return {
     id: 'mtr',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ sessionId, resume, resumeSessionId, initialPrompt }) {
       const mtrSessionId = nativeSessionId(sessionId, resumeSessionId);

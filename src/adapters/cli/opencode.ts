@@ -7,10 +7,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function createOpenCodeAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'opencode');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'opencode';
+  let cachedBin: string | undefined;
   return {
     id: 'opencode',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ initialPrompt, model }) {
       // OpenCode manages sessions internally (SQLite store).

@@ -126,10 +126,14 @@ async function waitForHistoryAppend(
 }
 
 export function createAntigravityAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'agy');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'agy';
+  let cachedBin: string | undefined;
   return {
     id: 'antigravity',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ resume, resumeSessionId, disableCliBypass }) {
       const args = disableCliBypass ? [] : ['--dangerously-skip-permissions'];

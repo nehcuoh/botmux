@@ -119,10 +119,14 @@ function latestCodexSessionForBotmuxSession(botmuxSessionId: string): string | u
 }
 
 export function createCodexAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'codex');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'codex';
+  let cachedBin: string | undefined;
   return {
     id: 'codex',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass }) {
       const baseArgs = [

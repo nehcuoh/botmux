@@ -14,7 +14,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { drainTranscript, joinAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -48,7 +48,7 @@ import {
   clamp,
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
-import { createCliAdapterSync } from './adapters/cli/registry.js';
+import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
@@ -3054,6 +3054,25 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`Re-attaching to existing ${effectiveBackendType} session: ${persistentSessionName} (requested CLI: ${cliAdapter.resolvedBin})`);
   } else {
     log(`Spawning fresh CLI: ${cliAdapter.resolvedBin} ${args.join(' ')} (cwd: ${cfg.workingDir})`);
+
+    // Pre-flight: resolvedBin resolves here (lazy). If resolveCommand fell back
+    // to a bare name and it isn't on the worker's PATH either, the spawn would
+    // fail repeatedly and surface only as a generic crash-loop ("X crashed N
+    // times"), with no hint about WHY. Instead surface ONE clear, reproducible
+    // message and stop — the user can fix PATH / install the CLI and retry.
+    const wantBin = cliAdapter.resolvedBin;
+    if (!locateOnPath(wantBin)) {
+      log(`CLI binary not found: ${wantBin} (PATH=${process.env.PATH ?? ''})`);
+      const probe = isAbsolute(wantBin) ? `ls -l ${wantBin}` : `which ${wantBin}`;
+      send({
+        type: 'user_notify',
+        message:
+          `无法启动 ${cliName()}：找不到可执行文件「${wantBin}」。\n` +
+          `请在运行 botmux daemon 的这台机器上确认它已安装并在 PATH 中（自查：${probe}），然后重发消息重试。\n` +
+          `当前 daemon PATH=${process.env.PATH ?? '(空)'}`,
+      });
+      return;
+    }
   }
 
   // Build the child env. redactChildEnv() DELETES the keys that must not leak

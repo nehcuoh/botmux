@@ -13,10 +13,14 @@ function delay(ms: number): Promise<void> {
 const cursorFirstWriteSeen = new WeakSet<PtyHandle>();
 
 export function createCursorAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'cursor-agent');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'cursor-agent';
+  let cachedBin: string | undefined;
   return {
     id: 'cursor',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ resume, resumeSessionId, model, disableCliBypass }) {
       // --force skips approvals so the model can act inside the topic without

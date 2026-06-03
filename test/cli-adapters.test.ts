@@ -10,9 +10,12 @@ import { randomUUID } from 'node:crypto';
 // Mock external dependencies BEFORE importing adapters
 // ---------------------------------------------------------------------------
 
-// Mock child_process.execSync so resolveCommand() returns the command as-is.
+// Mock child_process so resolveCommand()'s shell probe returns nothing (the
+// command falls through to the bare name). resolveCommand short-circuits
+// absolute paths before probing, so absolute pathOverrides never hit this.
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(() => ''),
+  spawnSync: vi.fn(() => ({ stdout: '', status: 0 })),
 }));
 
 import { createCliAdapterSync } from '../src/adapters/cli/registry.js';
@@ -54,6 +57,42 @@ describe('createCliAdapterSync factory', () => {
     const adapter = createCliAdapterSync(id, `/opt/${id}`);
     if (id === 'codex-app' || id === 'mira') expect(adapter.resolvedBin).toBe(process.execPath);
     else expect(adapter.resolvedBin).toBe(`/opt/${id}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Lazy binary resolution — constructing an adapter must NOT shell out.
+// Regression for the setup hang: `botmux setup` builds an adapter just to read
+// `modelChoices`; if resolveCommand ran at construction it could suspend setup
+// via the interactive shell probe. The probe must defer to first resolvedBin read.
+// ---------------------------------------------------------------------------
+
+describe('lazy binary resolution', () => {
+  // Adapters whose resolvedBin is the resolved CLI (codex-app/mira use
+  // process.execPath and never probe, so they're excluded).
+  const PROBING_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes'];
+
+  it.each(PROBING_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
+    const { spawnSync } = await import('node:child_process');
+    const probe = vi.mocked(spawnSync);
+    probe.mockClear();
+    const adapter = createCliAdapterSync(id); // bare command name → would probe if eager
+    // Seed eagerly resolves its bin to derive its data root; the others must not
+    // touch the shell until resolvedBin is read.
+    if (id !== 'seed') expect(probe).not.toHaveBeenCalled();
+    probe.mockClear();
+    void adapter.resolvedBin;
+    if (id !== 'seed') expect(probe).toHaveBeenCalled();
+  });
+
+  it('memoises: a second resolvedBin read does not probe again', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const probe = vi.mocked(spawnSync);
+    const adapter = createCliAdapterSync('claude-code');
+    void adapter.resolvedBin; // resolve + cache
+    probe.mockClear();
+    void adapter.resolvedBin; // cached → no probe
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 

@@ -7,10 +7,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function createGeminiAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'gemini');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'gemini';
+  let cachedBin: string | undefined;
   return {
     id: 'gemini',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ initialPrompt, model, disableCliBypass }) {
       // Gemini CLI manages sessions internally (--resume takes "latest" or

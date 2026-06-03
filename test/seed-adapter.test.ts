@@ -13,10 +13,12 @@ import { join, dirname } from 'node:path';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 
-// resolveCommand() shells out via execSync; mock it so an absolute pathOverride
-// is returned as-is (resolveCommand short-circuits absolute paths anyway).
+// resolveCommand() shells out to probe for the binary; mock it so an absolute
+// pathOverride is returned as-is (resolveCommand short-circuits absolute paths
+// before probing anyway).
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(() => ''),
+  spawnSync: vi.fn(() => ({ stdout: '', status: 0 })),
 }));
 
 import { createSeedAdapter, deriveSeedDataDir } from '../src/adapters/cli/seed.js';

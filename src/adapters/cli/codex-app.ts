@@ -23,7 +23,11 @@ function encodeInput(content: string): string {
 }
 
 export function createCodexAppAdapter(pathOverride?: string): CliAdapter {
-  const codexBin = resolveCommand(pathOverride ?? 'codex');
+  // Resolve the wrapped `codex` binary lazily, on first buildArgs (spawn time),
+  // so constructing the adapter during `botmux setup` doesn't shell out via
+  // resolveCommand. resolvedBin is the node runner, not codex itself.
+  const rawCodexBin = pathOverride ?? 'codex';
+  let cachedCodexBin: string | undefined;
   return {
     id: 'codex-app',
     resolvedBin: process.execPath,
@@ -32,7 +36,7 @@ export function createCodexAppAdapter(pathOverride?: string): CliAdapter {
       const args = [
         runnerPath(),
         '--session-id', sessionId,
-        '--codex-bin', codexBin,
+        '--codex-bin', (cachedCodexBin ??= resolveCommand(rawCodexBin)),
       ];
       if (resume && resumeSessionId) args.push('--thread-id', resumeSessionId);
       pushOpt(args, '--cwd', workingDir);

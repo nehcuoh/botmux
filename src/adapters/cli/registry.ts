@@ -1,5 +1,5 @@
-import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { CliAdapter, CliId } from './types.js';
@@ -24,17 +24,34 @@ export function resolveCommand(cmd: string): string {
   if (isAbsolute(cmd)) return cmd;
   const shell = process.env.SHELL || '/bin/zsh';
   const shells = [shell, '/bin/zsh', '/bin/bash'].filter((v, i, a) => a.indexOf(v) === i);
+  // `setsid` (util-linux) runs the probe in its own session with NO controlling
+  // terminal. Absent on macOS — there the tty-free stdio below is the safeguard.
+  const setsidBin = existsSync('/usr/bin/setsid') ? '/usr/bin/setsid' : null;
   // -lc: login shell (sources .profile/.zprofile) — covers npm/nvm/fnm installs
   // -ic: interactive shell (sources .bashrc/.zshrc) — covers installers like opencode
   for (const flags of ['-lc', '-ic']) {
     for (const sh of shells) {
-      try {
-        const result = execSync(`${sh} ${flags} 'which ${cmd}' 2>/dev/null`, {
-          encoding: 'utf-8',
-          timeout: 5_000,
-        }).trim();
-        if (result && isAbsolute(result)) return result;
-      } catch { /* try next */ }
+      // Harden the probe so it can't disturb the caller's terminal:
+      //  - stdio ['ignore','pipe','ignore'] → stdin & stderr are /dev/null, so a
+      //    `read` in the user's rc gets EOF instead of blocking, and the
+      //    interactive `-ic` shell sees no tty on its fds → it won't enable job
+      //    control or tcsetpgrp the controlling terminal;
+      //  - `setsid` (when present) gives it its own session with no controlling
+      //    tty, so even rc that pokes /dev/tty directly can't grab it or
+      //    SIGTTIN-suspend us.
+      // Without this, probing a CLI during `botmux setup` could silently
+      // suspend setup (the reported "[1]+ Stopped" with no error). `-ic` is
+      // kept so rc-only installs are still found.
+      const argv = setsidBin
+        ? [setsidBin, '-w', sh, flags, `which ${cmd}`]
+        : [sh, flags, `which ${cmd}`];
+      const result = spawnSync(argv[0]!, argv.slice(1), {
+        encoding: 'utf-8',
+        timeout: 5_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const found = (result.stdout ?? '').trim();
+      if (found && isAbsolute(found)) return found;
     }
   }
   if (process.platform === 'darwin' && cmd === 'codex') {
@@ -47,6 +64,26 @@ export function resolveCommand(cmd: string): string {
     }
   }
   return cmd;
+}
+
+/**
+ * Locate an executable the way `execvp` will at spawn time: an absolute path is
+ * checked directly, a bare name is searched across the current process's PATH.
+ * Returns the resolved absolute path, or null when nothing runnable is found.
+ *
+ * Used by the worker as a pre-flight before spawning the CLI, so a missing
+ * binary becomes one clear, reproducible message to the user instead of a
+ * silent crash-loop. Cheap and shell-free (no rc side effects).
+ */
+export function locateOnPath(cmd: string): string | null {
+  if (isAbsolute(cmd)) {
+    try { accessSync(cmd, constants.X_OK); return cmd; } catch { return null; }
+  }
+  for (const dir of (process.env.PATH ?? '').split(':').filter(Boolean)) {
+    const candidate = join(dir, cmd);
+    try { accessSync(candidate, constants.X_OK); return candidate; } catch { /* next dir */ }
+  }
+  return null;
 }
 
 const adapterCache = new Map<string, CliAdapter>();

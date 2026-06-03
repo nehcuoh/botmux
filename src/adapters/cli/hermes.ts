@@ -7,10 +7,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function createHermesAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'hermes');
+  // resolvedBin is lazy: setup constructs adapters only to read static
+  // modelChoices and must not shell out (see resolveCommand); the binary path
+  // is a spawn-time concern.
+  const rawBin = pathOverride ?? 'hermes';
+  let cachedBin: string | undefined;
   return {
     id: 'hermes',
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ sessionId, resume, disableCliBypass }) {
       const args: string[] = [];

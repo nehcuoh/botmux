@@ -412,7 +412,6 @@ export interface ClaudeFamilyVariant {
 }
 
 export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
-  const bin = resolveCommand(pathOverride ?? 'claude');
   return createClaudeFamilyAdapter({
     id: 'claude-code',
     resumeBin: 'claude',
@@ -420,13 +419,18 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
     stateJsonPath: join(homedir(), '.claude.json'),
     // alias（opus/sonnet/haiku）会被 Claude Code 解析成当前推荐的具体版本；具体 ID 锁版本。
     modelChoices: ['opus', 'sonnet', 'haiku', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-  }, bin);
+  }, pathOverride ?? 'claude');
 }
 
-export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, bin: string): CliAdapter {
+export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: string): CliAdapter {
+  // resolvedBin is resolved lazily on first read (memoised) so merely
+  // constructing the adapter — e.g. `botmux setup` reading modelChoices — never
+  // shells out via resolveCommand. The binary path is a spawn-time concern.
+  // (Seed passes an already-absolute bin here, so this getter is a no-op for it.)
+  let cachedBin: string | undefined;
   return {
     id: variant.id,
-    resolvedBin: bin,
+    get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
     supportsTypeAhead: true,
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
