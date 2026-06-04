@@ -71,6 +71,7 @@ import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
 import { redactChildEnv } from './utils/child-env.js';
+import { decideSubmitConfirmationAction, type SubmitActivityEvidence } from './services/submit-confirmation.js';
 import { config } from './config.js';
 import * as sessionStore from './services/session-store.js';
 import * as pty from 'node-pty';
@@ -120,6 +121,10 @@ let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
 let isFlushing = false;
 const pendingMessages: string[] = [];
+/** Alternate submit-confirmation signals. Some CLIs can consume PTY input and
+ *  start work before their history/transcript submit marker is observable. */
+let lastPtyActivityAtMs = 0;
+let lastStructuredBridgeActivityAtMs = 0;
 
 type RuntimeScreenStatus = Exclude<ScreenStatus, 'limited'>;
 
@@ -369,6 +374,13 @@ function readSendMarkers(): BridgeSendMarker[] {
     log(`Bridge marker read failed: ${err.message}`);
     return [];
   }
+}
+
+function submitActivityEvidenceSince(sinceMs: number): SubmitActivityEvidence | undefined {
+  if (lastPtyActivityAtMs > sinceMs) return 'pty-output';
+  if (lastStructuredBridgeActivityAtMs > sinceMs) return 'structured-transcript';
+  if (readSendMarkers().some(m => m.sentAtMs >= sinceMs)) return 'botmux-send';
+  return undefined;
 }
 
 function clearSendMarkers(): void {
@@ -1099,6 +1111,7 @@ function bridgeIngest(): void {
   const result = drainTranscript(bridgeJsonlPath, bridgeOffset);
   bridgeOffset = result.newOffset;
   bridgePendingTail = result.pendingTail;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   bridgeQueue.ingest(result.events, bridgeJsonlPath);
 }
 
@@ -1505,6 +1518,7 @@ function hermesBridgeIngest(): void {
   if (!hermesBridgeBaselineDone) return;
   const result = drainHermesStateDb(hermesBridgeOffset);
   hermesBridgeOffset = result.newOffset;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   if (result.events.some(e => e.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
@@ -1542,6 +1556,7 @@ function mtrBridgeIngest(): void {
   if (!mtrBridgeBaselineDone || !mtrBridgeSource) return;
   const result = drainMtrSession(mtrBridgeSource, mtrBridgeOffset);
   mtrBridgeOffset = result.newOffset;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   if (result.events.some(e => e.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
@@ -1655,6 +1670,7 @@ function codexBridgeIngest(): void {
   const result = structuredBridgeIngestPath(codexBridgeRolloutPath, codexBridgeOffset);
   codexBridgeOffset = result.newOffset;
   codexBridgePendingTail = result.pendingTail;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   // Transcript-driven idle: an `assistant_final` event is the CLI declaring
   // end-of-turn, far more reliable than the screen-pattern heuristic
@@ -2360,6 +2376,7 @@ function splitCodexAppControl(data: string): string {
 function onPtyData(data: string): void {
   data = splitCodexAppControl(data);
   if (data.length === 0) return;
+  lastPtyActivityAtMs = Date.now();
   captureWorkflowTranscript(data);
   renderer?.write(data);
 
@@ -2490,42 +2507,67 @@ function scheduleSubmitFailureNotify(
     }
   };
   if (failureReason) {
+    const action = decideSubmitConfirmationAction({
+      failureReason,
+      recheckSubmitted: false,
+      usageLimitDetected: false,
+    });
     dropBridgeMark();
-    log(`writeInput: submit impossible — notifying user immediately. reason="${failureReason}" preview="${preview}"`);
+    const reason = action.kind === 'notify-hard-failure' ? action.reason : failureReason;
+    log(`writeInput: submit impossible — notifying user immediately. reason="${reason}" preview="${preview}"`);
     send({
       type: 'user_notify',
-      message: `⚠️ 刚才那条消息没有写入 ${cliName()}，因为当前按键配置无法从终端自动提交。\n原因：${failureReason}\n请调整 Claude Code Chat keybinding 后重发。\n开头：${preview}`,
+      message: `⚠️ 刚才那条消息没有写入 ${cliName()}，因为当前按键配置无法从终端自动提交。\n原因：${reason}\n请调整 Claude Code Chat keybinding 后重发。\n开头：${preview}`,
     });
     return;
   }
+  const activityBaselineMs = Date.now();
   log(`writeInput: submit not confirmed after retries — deferred ${SUBMIT_DEFERRED_RECHECK_MS}ms recheck queued. preview="${preview}"`);
   setTimeout(async () => {
+    let recheckSubmitted = false;
+    let cliSessionId: string | undefined;
     if (recheck) {
       try {
         const recheckResult = await recheck();
-        const recheckSubmitted = typeof recheckResult === 'boolean'
+        recheckSubmitted = typeof recheckResult === 'boolean'
           ? recheckResult
           : recheckResult.submitted === true;
-        if (recheckSubmitted) {
-          const cliSessionId = typeof recheckResult === 'object' && recheckResult && typeof recheckResult.cliSessionId === 'string'
-            ? recheckResult.cliSessionId
-            : undefined;
-          if (cliSessionId) {
-            persistCliSessionId(cliSessionId);
-            if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cliSessionId);
-          }
-          log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
-          return;
-        }
+        cliSessionId = typeof recheckResult === 'object' && recheckResult && typeof recheckResult.cliSessionId === 'string'
+          ? recheckResult.cliSessionId
+          : undefined;
       } catch (err: any) {
         log(`Deferred recheck threw (${err?.message ?? err}); falling through to warning.`);
       }
     }
-    if (usageLimitTracker.detectedThisTurn(turnSeq)) {
-      dropBridgeMark();
-      log(`Deferred recheck missing but usage limit was detected for this turn — suppressing submit warning. preview="${preview}"`);
-      return;
+
+    const action = decideSubmitConfirmationAction({
+      recheckSubmitted,
+      usageLimitDetected: usageLimitTracker.detectedThisTurn(turnSeq),
+      activityEvidence: submitActivityEvidenceSince(activityBaselineMs),
+    });
+
+    switch (action.kind) {
+      case 'suppress-confirmed':
+        if (cliSessionId) {
+          persistCliSessionId(cliSessionId);
+          if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cliSessionId);
+        }
+        log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
+        return;
+      case 'suppress-usage-limit':
+        dropBridgeMark();
+        log(`Deferred recheck missing but usage limit was detected for this turn — suppressing submit warning. preview="${preview}"`);
+        return;
+      case 'suppress-active':
+        log(`Deferred recheck missing but later ${action.evidence} shows ${cliName()} is active — suppressing submit warning. preview="${preview}"`);
+        return;
+      case 'notify-hard-failure':
+        // failureReason is handled synchronously above.
+        return;
+      case 'notify-stuck':
+        break;
     }
+
     dropBridgeMark();
     log(`Deferred recheck still missing — notifying user. preview="${preview}"`);
     send({
