@@ -24,6 +24,7 @@ import { DEFAULT_NODE_TIMEOUT_SEC, isGoalNode, type V3Dag, type V3Node } from '.
 import { decideNext } from './orchestrator.js';
 import { appendEvent, readJournal, type StoredEvent, type V3ErrorClass } from './journal.js';
 import { materialize, writeState } from './state.js';
+import { writePendingWait } from './human-gate.js';
 import {
   GOAL_ENV,
   MANIFEST_FILE_KINDS,
@@ -116,6 +117,10 @@ export interface V3RuntimeDeps {
 export interface V3RuntimeOptions {
   /** The run lives in `${baseDir}/${dag.runId}`. */
   baseDir: string;
+  /** Gate handling model. `blocking` keeps the CLI/dev y/N path; `suspend`
+   *  writes the pending wait and returns `awaitingGate` for a daemon/card layer
+   *  to resolve and re-drive from disk. */
+  gateMode?: 'blocking' | 'suspend'; // default blocking
   /** Concurrency caps (codex's three-layer cap; conservative defaults). */
   globalConcurrency?: number; // default 4
   perBotConcurrency?: number; // default 1
@@ -123,11 +128,15 @@ export interface V3RuntimeOptions {
   cancelSignal?: AbortSignal;
 }
 
-export interface V3RunOutcome {
-  runStatus: 'succeeded' | 'failed';
-  failedNodeId?: string;
-  runDir: string;
+export interface V3PendingGate {
+  nodeId: string;
+  waitId: string;
+  prompt: string;
 }
+
+export type V3RunOutcome =
+  | { reason: 'terminal'; runStatus: 'succeeded' | 'failed'; failedNodeId?: string; runDir: string }
+  | { reason: 'awaitingGate'; pendingWaits: V3PendingGate[]; runDir: string };
 
 // ─── Main loop ───────────────────────────────────────────────────────────
 
@@ -149,6 +158,7 @@ export async function runWorkflow(
   const globalCap = opts.globalConcurrency ?? 4;
   const perBotCap = opts.perBotConcurrency ?? 1;
   const perCliCap = opts.perCliConcurrency ?? 2;
+  const gateMode = opts.gateMode ?? 'blocking';
 
   const nodesById = new Map(dag.nodes.map((n) => [n.id, n]));
 
@@ -242,6 +252,10 @@ export async function runWorkflow(
     if (inFlight.size === 0) {
       if (aborted) break; // cancelled with nothing running → stop
       if (startedThisTick === 0) {
+        const pendingWaits = gateMode === 'suspend' ? pendingGateWaits(snap.nodes) : [];
+        if (pendingWaits.length > 0) {
+          return { reason: 'awaitingGate', pendingWaits, runDir };
+        }
         // Not terminal, nothing running, nothing dispatchable — a correct
         // decideNext never gets here; guard against an infinite spin.
         throw new Error('v3 runtime: no progress possible and run is not terminal');
@@ -254,6 +268,7 @@ export async function runWorkflow(
 
   const finalSnap = materialize(readJournal(journalPath));
   return {
+    reason: 'terminal',
     runStatus: finalSnap.runStatus === 'succeeded' ? 'succeeded' : 'failed',
     failedNodeId: finalSnap.failedNodeId,
     runDir,
@@ -381,14 +396,20 @@ export async function runWorkflow(
   }
 
   function startGate(node: V3Node): void {
+    const waitId = `${node.id}-gate`; // MVP: one gate per node
+    const prompt = node.humanGate!.prompt;
+    appendEvent(journalPath, { type: 'gateDispatched', nodeId: node.id, waitId });
+
+    if (gateMode === 'suspend') {
+      writePendingWait(runDir, { waitId, nodeId: node.id, prompt });
+      return;
+    }
+
     if (!deps.resolveGate) {
       throw new Error(
         `v3 runtime: node "${node.id}" has a humanGate but no resolveGate handler was injected`,
       );
     }
-    const waitId = `${node.id}-gate`; // MVP: one gate per node
-    const prompt = node.humanGate!.prompt;
-    appendEvent(journalPath, { type: 'gateDispatched', nodeId: node.id, waitId });
     const key = `${node.id}::gate`;
     const p = deps
       .resolveGate({ nodeId: node.id, prompt, waitId, runDir })
@@ -404,6 +425,17 @@ export async function runWorkflow(
         inFlight.delete(key);
       });
     inFlight.set(key, p);
+  }
+
+  function pendingGateWaits(state: Map<string, { status: string }>): V3PendingGate[] {
+    const waits: V3PendingGate[] = [];
+    for (const node of dag.nodes) {
+      if (state.get(node.id)?.status !== 'gateWaiting') continue;
+      const prompt = node.humanGate?.prompt;
+      if (!prompt) continue;
+      waits.push({ nodeId: node.id, waitId: `${node.id}-gate`, prompt });
+    }
+    return waits;
   }
 
   function releaseSlots(botKey: string, cliId: string): void {

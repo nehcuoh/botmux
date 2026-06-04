@@ -15,7 +15,7 @@ import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { validateDag } from '../src/workflows/v3/dag.js';
-import { readJournal } from '../src/workflows/v3/journal.js';
+import { appendEvent, readJournal } from '../src/workflows/v3/journal.js';
 import { runWorkflow, type V3RuntimeDeps } from '../src/workflows/v3/runtime.js';
 import { readAndValidateManifest, ManifestValidationError } from '../src/workflows/v3/manifest.js';
 import {
@@ -101,7 +101,8 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
       const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
       const outcome = await runWorkflow(validateDag(TWO_NODE), deps, { baseDir: base });
 
-      expect(outcome.runStatus).toBe('succeeded');
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
+      if (outcome.reason !== 'terminal') throw new Error('expected terminal outcome');
       expect(summarizeSawResearch).toBe(true);
 
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
@@ -143,7 +144,8 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
       const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
       const outcome = await runWorkflow(validateDag(TWO_NODE), deps, { baseDir: base });
 
-      expect(outcome.runStatus).toBe('failed');
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'failed' });
+      if (outcome.reason !== 'terminal') throw new Error('expected terminal outcome');
       expect(outcome.failedNodeId).toBe('research');
 
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
@@ -171,11 +173,150 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
       const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
       const outcome = await runWorkflow(validateDag(TWO_NODE), deps, { baseDir: base });
 
-      expect(outcome.runStatus).toBe('failed');
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'failed' });
+      if (outcome.reason !== 'terminal') throw new Error('expected terminal outcome');
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
       const failed = events.find((e) => e.type === 'nodeFailed') as any;
       expect(failed.nodeId).toBe('research');
       expect(failed.errorClass).toBe('manifestInvalid');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runWorkflow — humanGate suspend mode', () => {
+  it('suspend 模式：派 gate 后写 pending wait 并返回 awaitingGate；批准后 redrive 继续跑 work', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-gate-'));
+    try {
+      const dag = validateDag({
+        runId: 'gate-run',
+        nodes: [{
+          id: 'deploy',
+          type: 'goal',
+          goal: 'deploy',
+          depends: [],
+          inputs: [],
+          humanGate: { prompt: '批准部署？' },
+        }],
+      });
+      let runNodeCalls = 0;
+      const runNode: RunNode = async (req) => {
+        runNodeCalls++;
+        const file = product(req.outputDir, 'deploy.md', '# deployed');
+        const manifestPath = writeManifest(req, {
+          schemaVersion: 1, status: 'ok', summary: 'deployed', files: [file],
+        });
+        return { status: 'ok', manifestPath };
+      };
+      const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
+
+      const first = await runWorkflow(dag, deps, { baseDir: base, gateMode: 'suspend' });
+
+      expect(first).toEqual({
+        reason: 'awaitingGate',
+        runDir: join(base, 'gate-run'),
+        pendingWaits: [{ nodeId: 'deploy', waitId: 'deploy-gate', prompt: '批准部署？' }],
+      });
+      expect(runNodeCalls).toBe(0);
+      expect(readWait(first.runDir, 'deploy-gate')).toMatchObject({
+        status: 'pending',
+        nodeId: 'deploy',
+        prompt: '批准部署？',
+      });
+      let events = readJournal(join(first.runDir, 'journal.ndjson'));
+      expect(events.some((e) => e.type === 'gateDispatched' && e.nodeId === 'deploy')).toBe(true);
+      expect(events.some((e) => e.type === 'nodeDispatched' && e.nodeId === 'deploy')).toBe(false);
+
+      resolveWait(first.runDir, 'deploy-gate', 'approved', 'ou_reviewer');
+      appendEvent(join(first.runDir, 'journal.ndjson'), {
+        type: 'gateResolved',
+        nodeId: 'deploy',
+        waitId: 'deploy-gate',
+        resolution: 'approved',
+        by: 'ou_reviewer',
+      });
+
+      const second = await runWorkflow(dag, deps, { baseDir: base, gateMode: 'suspend' });
+      expect(second).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
+      expect(runNodeCalls).toBe(1);
+      events = readJournal(join(second.runDir, 'journal.ndjson'));
+      expect(events.some((e) => e.type === 'nodeSucceeded' && e.nodeId === 'deploy')).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('suspend 模式：并发 work 先 settle，之后才返回 awaitingGate', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-gate-par-'));
+    try {
+      const dag = validateDag({
+        runId: 'gate-parallel',
+        nodes: [
+          {
+            id: 'approval',
+            type: 'goal',
+            goal: 'approval',
+            depends: [],
+            inputs: [],
+            humanGate: { prompt: '批准？' },
+          },
+          { id: 'research', type: 'goal', goal: 'research', depends: [], inputs: [] },
+        ],
+      });
+      const runNode: RunNode = async (req) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const file = product(req.outputDir, 'research.md', '# facts');
+        const manifestPath = writeManifest(req, {
+          schemaVersion: 1, status: 'ok', summary: 'facts', files: [file],
+        });
+        return { status: 'ok', manifestPath };
+      };
+      const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
+
+      const outcome = await runWorkflow(dag, deps, { baseDir: base, gateMode: 'suspend', globalConcurrency: 2 });
+
+      expect(outcome).toMatchObject({ reason: 'awaitingGate' });
+      if (outcome.reason !== 'awaitingGate') throw new Error('expected awaitingGate outcome');
+      expect(outcome.pendingWaits).toEqual([{ nodeId: 'approval', waitId: 'approval-gate', prompt: '批准？' }]);
+      const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
+      expect(events.some((e) => e.type === 'nodeSucceeded' && e.nodeId === 'research')).toBe(true);
+      expect(readWait(outcome.runDir, 'approval-gate')?.status).toBe('pending');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('默认 blocking 模式保持 CLI/dev 语义：resolveGate 批准后同一次 run 继续执行', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-gate-block-'));
+    try {
+      const dag = validateDag({
+        runId: 'gate-block',
+        nodes: [{
+          id: 'deploy',
+          type: 'goal',
+          goal: 'deploy',
+          depends: [],
+          inputs: [],
+          humanGate: { prompt: '批准部署？' },
+        }],
+      });
+      const runNode: RunNode = async (req) => {
+        const file = product(req.outputDir, 'deploy.md', '# deployed');
+        const manifestPath = writeManifest(req, {
+          schemaVersion: 1, status: 'ok', summary: 'deployed', files: [file],
+        });
+        return { status: 'ok', manifestPath };
+      };
+      const resolveGate = createFileGate({
+        awaitDecision: async () => ({ resolution: 'approved', by: 'ou_cli' }),
+      });
+      const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot, resolveGate };
+
+      const outcome = await runWorkflow(dag, deps, { baseDir: base });
+
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
+      expect(readWait(outcome.runDir, 'deploy-gate')).toMatchObject({ status: 'approved', by: 'ou_cli' });
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -261,7 +402,7 @@ describe('runtime CLI 白名单守卫', () => {
       };
       const dag = validateDag({ runId: 'codex-run', nodes: [{ id: 'n', type: 'goal', goal: 'g', depends: [], inputs: [] }] });
       const outcome = await runWorkflow(dag, deps, { baseDir: base });
-      expect(outcome.runStatus).toBe('succeeded');
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -281,7 +422,7 @@ describe('runtime CLI 白名单守卫', () => {
       };
       const dag = validateDag({ runId: 'seed-run', nodes: [{ id: 'n', type: 'goal', goal: 'g', depends: [], inputs: [] }] });
       const outcome = await runWorkflow(dag, deps, { baseDir: base });
-      expect(outcome.runStatus).toBe('succeeded');
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

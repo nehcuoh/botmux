@@ -253,6 +253,13 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
   }
 
   printOutcome(outcome.runDir);
+  if (outcome.reason === 'awaitingGate') {
+    console.error(
+      `\n⏸️  run 正在等待 humanGate：${outcome.pendingWaits.map(w => `${w.nodeId}(${w.waitId})`).join(', ')}`,
+    );
+    console.error(`   CLI 默认应使用 blocking gate；若看到此消息，请改用 daemon 驱动或检查 gateMode。`);
+    process.exit(1);
+  }
   if (outcome.runStatus === 'succeeded') {
     console.log(`\n✅ run 成功 — 产物在 ${outcome.runDir}`);
     process.exit(0);
