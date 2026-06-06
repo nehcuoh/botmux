@@ -246,4 +246,26 @@ describe('listChatBotMembers', () => {
     expect(fromPeer.find(b => b.openId === 'ou_B_as_seen_by_peer')).toBeDefined();
     expect(fromPeer.find(b => b.openId === 'ou_B_as_seen_by_self')).toBeUndefined();
   });
+
+  it('deduplicates same-name observed entries and keeps only the latest mentionable openId', async () => {
+    state.dataDir = mkdtempSync(join(tmpdir(), 'botmux-list-chat-bots-'));
+    writeFileSync(join(state.dataDir, 'bots-info.json'), '[]');
+    const now = Date.now();
+    writeFileSync(join(state.dataDir, 'observed-bots-cli_self-oc_chat.json'), JSON.stringify({
+      'ou_stale': { name: 'NasCodex', source: 'introduce', firstSeenAt: now - 10_000, lastSeenAt: now - 10_000 },
+      'ou_current': { name: 'NasCodex', source: 'introduce', firstSeenAt: now, lastSeenAt: now },
+    }));
+
+    const { listChatBotMembers } = await import('../src/im/lark/client.js');
+    const bots = await listChatBotMembers('cli_self', 'oc_chat');
+
+    const nasEntries = bots.filter(b => b.displayName === 'NasCodex');
+    expect(nasEntries).toHaveLength(1);
+    expect(nasEntries[0]).toMatchObject({
+      openId: 'ou_current',
+      mentionable: true,
+      mentionSource: 'observed',
+    });
+    expect(bots.find(b => b.openId === 'ou_stale')).toBeUndefined();
+  });
 });

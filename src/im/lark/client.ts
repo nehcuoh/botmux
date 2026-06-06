@@ -1108,6 +1108,13 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
   //   2) Otherwise (no/ambiguous match) → append as an external bot.
   try {
     const observedList = listObservedBots(config.session.dataDir, larkAppId, chatId);
+    const latestObservedByName = new Map<string, (typeof observedList)[number]>();
+    for (const o of observedList) {
+      const existing = latestObservedByName.get(o.name);
+      if (!existing || o.lastSeenAt > existing.lastSeenAt) {
+        latestObservedByName.set(o.name, o);
+      }
+    }
     const seenOpenIds = new Set(configured.map(b => b.openId));
     const norm = (s: string) => s.trim().toLowerCase();
     const byName = new Map<string, number[]>();
@@ -1117,7 +1124,7 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
       if (arr) arr.push(i); else byName.set(k, [i]);
     });
 
-    for (const o of observedList) {
+    for (const o of latestObservedByName.values()) {
       if (seenOpenIds.has(o.openId)) continue;
       const matches = byName.get(norm(o.name)) ?? [];
       if (matches.length === 1) {
