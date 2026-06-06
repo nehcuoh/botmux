@@ -1,0 +1,49 @@
+/**
+ * Regression: a fixed-port http server bind must NOT crash on EADDRINUSE when
+ * another process (e.g. a second botmux instance on a shared machine) already
+ * holds the port. listenWithProbe mirrors core/terminal-proxy.ts: it probes
+ * port+1.. up to maxProbe times and resolves with the actually-bound port, so
+ * the dashboard IPC server (dashboard-ipc-server.ts) and the dashboard process
+ * (dashboard.ts) step to a free port instead of emitting an unhandled 'error'
+ * that tears the process down.
+ *
+ * Run: pnpm vitest run test/listen-with-probe.test.ts
+ */
+import { describe, it, expect, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import { listenWithProbe } from '../src/utils/listen-with-probe.js';
+
+const open: Server[] = [];
+function mk(): Server { const s = createServer((_q, r) => r.end('ok')); open.push(s); return s; }
+function rawListen(s: Server, port: number, host = '127.0.0.1'): Promise<number> {
+  return new Promise((resolve, reject) => {
+    s.once('error', reject);
+    s.listen(port, host, () => { const a = s.address(); resolve(typeof a === 'object' && a ? a.port : 0); });
+  });
+}
+afterEach(async () => { for (const s of open.splice(0)) await new Promise<void>(r => s.close(() => r())); });
+
+describe('listenWithProbe', () => {
+  it('binds the requested port when it is free', async () => {
+    const port = await listenWithProbe({ server: mk(), port: 0, host: '127.0.0.1' });
+    expect(port).toBeGreaterThan(0);
+  });
+
+  it('probes to the next port without crashing when the requested port is busy', async () => {
+    const busy = await rawListen(mk(), 0);
+    const logs: string[] = [];
+    const bound = await listenWithProbe({ server: mk(), port: busy, host: '127.0.0.1', log: m => logs.push(m) });
+    expect(bound).toBe(busy + 1);
+    expect(logs.join('\n')).toContain(`${busy} in use`);
+  });
+
+  it('rejects (does not loop forever) once maxProbe is exhausted', async () => {
+    const busy = await rawListen(mk(), 0);
+    await rawListen(mk(), busy + 1);            // occupy the single probe target too
+    let err: NodeJS.ErrnoException | null = null;
+    await listenWithProbe({ server: mk(), port: busy, host: '127.0.0.1', maxProbe: 1 })
+      .catch(e => { err = e; });
+    expect(err).not.toBeNull();
+    expect(err!.code).toBe('EADDRINUSE');
+  });
+});

@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
+import { listenWithProbe } from './utils/listen-with-probe.js';
 import {
   generateToken, parseCookie, buildSetCookie, verifyHmac, decideDashboardAuth,
   loadPersistedToken, persistToken,
@@ -35,6 +36,10 @@ const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
 const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
+// The dashboard probes upward if its configured port is busy (e.g. a second
+// botmux instance on this host). The actually-bound port is persisted here so
+// the `botmux dashboard` CLI can reach /__cli/rotate without guessing.
+const PORT_PATH = join(homedir(), '.botmux', '.dashboard-port');
 
 function loadOrCreateSecret(): string {
   if (existsSync(SECRET_PATH)) return readFileSync(SECRET_PATH, 'utf8').trim();
@@ -50,6 +55,10 @@ function loadOrCreateSecret(): string {
 // dashboard URL survives `botmux restart`; only `botmux dashboard` (the
 // /__cli/rotate endpoint) rotates it and thereby invalidates the old link.
 let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
+
+// The port we actually bound (may differ from config.dashboard.port after an
+// EADDRINUSE probe). Used for the rotation-URL and persisted for the CLI.
+let boundDashboardPort = config.dashboard.port;
 
 const SECRET = loadOrCreateSecret();
 mkdirSync(REGISTRY_DIR, { recursive: true });
@@ -374,7 +383,7 @@ const server = createServer(async (req, res) => {
       } catch (e) {
         logger.warn(`[dashboard] Failed to persist token to ${TOKEN_PATH}: ${(e as Error).message}`);
       }
-      const fullUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}/?t=${activeToken}`;
+      const fullUrl = `http://${config.dashboard.externalHost}:${boundDashboardPort}/?t=${activeToken}`;
       return jsonRes(res, 200, { url: fullUrl });
     }
 
@@ -1046,8 +1055,24 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(config.dashboard.port, config.dashboard.host, () => {
-  logger.info(`[dashboard] listening on ${config.dashboard.host}:${config.dashboard.port}`);
+// Probe upward on EADDRINUSE rather than crashing with an unhandled 'error':
+// a second botmux instance on this host (or a stray process) holding the
+// configured port would otherwise tear the dashboard process down on bind.
+// The bound port is persisted so `botmux dashboard` can still reach us.
+listenWithProbe({
+  server,
+  port: config.dashboard.port,
+  host: config.dashboard.host,
+  log: (m) => logger.warn(`[dashboard] ${m}`),
+}).then((port) => {
+  boundDashboardPort = port;
+  try { writeFileSync(PORT_PATH, String(port)); } catch (e) {
+    logger.warn(`[dashboard] Failed to persist port to ${PORT_PATH}: ${(e as Error).message}`);
+  }
+  logger.info(`[dashboard] listening on ${config.dashboard.host}:${port}`);
+}).catch((err) => {
+  logger.error(`[dashboard] could not bind near ${config.dashboard.host}:${config.dashboard.port} after probing — set BOTMUX_DASHBOARD_PORT to a free port. ${(err as Error).message}`);
+  process.exit(1);
 });
 
 // Federation: periodically push this deployment's bots + heartbeat to every hub

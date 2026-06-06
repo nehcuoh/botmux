@@ -38,6 +38,7 @@ import { baselineJsonlCursor } from './services/jsonl-cursor.js';
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
 import type { DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey, ScreenStatus } from './types.js';
 import { TerminalRenderer } from './utils/terminal-renderer.js';
 import {
@@ -3748,27 +3749,13 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
       }
     });
 
-    const listenPort = preferredPort ?? 0;
-    httpServer.listen(listenPort, host, () => {
-      const addr = httpServer!.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      log(`HTTP listening on ${host}:${port}`);
-      resolve(port);
-    });
-    httpServer.on('error', (err: NodeJS.ErrnoException) => {
-      if (preferredPort && err.code === 'EADDRINUSE') {
-        // Preferred port in use — fall back to random
-        log(`Preferred port ${preferredPort} in use, falling back to random`);
-        httpServer!.listen(0, host, () => {
-          const addr = httpServer!.address();
-          const port = typeof addr === 'object' && addr ? addr.port : 0;
-          log(`HTTP listening on ${host}:${port} (fallback)`);
-          resolve(port);
-        });
-      } else {
-        reject(err);
-      }
-    });
+    // Bind + EADDRINUSE→random-port fallback live in a shared helper that also
+    // attaches the load-bearing wss 'error' listener: `new WebSocketServer({
+    // server })` makes ws proxy the http server's 'error' onto the wss, so a
+    // busy port would otherwise emit an UNHANDLED 'error' on the wss and crash
+    // the worker before this fallback can run. See web-terminal-listen.ts.
+    listenWebTerminalWithFallback({ httpServer: httpServer!, wss: wss!, host, preferredPort, log })
+      .then(resolve, reject);
   });
 }
 

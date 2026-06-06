@@ -2982,6 +2982,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // newly-started daemon's hydrate failing on dashboard startup. Binds to
   // 127.0.0.1 only since the dashboard sibling runs on the same host.
   const ipcHandle = await startIpcServer({ port: ipcPort, host: '127.0.0.1' });
+  // startIpcServer probes upward on EADDRINUSE (e.g. a second botmux instance on
+  // this host already holds ipcBasePort+idx), so the bound port may differ from
+  // the requested one. Republish the ACTUAL port into the descriptor before it
+  // is written below — the dashboard reaches us via desc.ipcPort verbatim.
+  desc.ipcPort = ipcHandle.port;
   logger.info(`[dashboard-ipc] listening on 127.0.0.1:${ipcHandle.port} (bot ${idx})`);
 
   // Single reverse-proxy port that fronts every session's web terminal under

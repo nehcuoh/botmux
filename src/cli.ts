@@ -1426,7 +1426,13 @@ async function cmdDashboard(): Promise<void> {
   const ts = Math.floor(Date.now() / 1000).toString();
   const nonce = randomBytes(8).toString('hex');
   const sig = createHmac('sha256', secret).update(`${ts}:${nonce}`).digest('base64url');
-  const port = process.env.BOTMUX_DASHBOARD_PORT ?? '7891';
+  // Prefer the port the dashboard actually bound (it probes upward on
+  // EADDRINUSE, so the live port can differ from the configured default). The
+  // running dashboard refreshes this file on every successful bind.
+  const portFile = join(CONFIG_DIR, '.dashboard-port');
+  const port = (existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : '')
+    || process.env.BOTMUX_DASHBOARD_PORT
+    || '7891';
 
   let res: Response;
   try {

@@ -1,6 +1,7 @@
 // src/core/dashboard-ipc-server.ts
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { logger } from '../utils/logger.js';
+import { listenWithProbe } from '../utils/listen-with-probe.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
@@ -812,33 +813,36 @@ ipcRoute('GET', '/api/events', (_req, res) => {
 });
 
 export function startIpcServer(opts: { port: number; host: string }): Promise<IpcServerHandle> {
-  return new Promise((resolve, reject) => {
-    const server: Server = createServer(async (req, res) => {
-      try {
-        const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-        for (const r of routes) {
-          if (r.method !== req.method) continue;
-          const m = r.pattern.exec(url.pathname);
-          if (!m) continue;
-          const params: Record<string, string> = {};
-          r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
-          await r.handler(req, res, params);
-          return;
-        }
-        jsonRes(res, 404, { error: 'not_found', path: url.pathname });
-      } catch (err) {
-        logger.error('[dashboard-ipc] handler error', err);
-        if (!res.headersSent) jsonRes(res, 500, { error: String(err) });
+  const server: Server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      for (const r of routes) {
+        if (r.method !== req.method) continue;
+        const m = r.pattern.exec(url.pathname);
+        if (!m) continue;
+        const params: Record<string, string> = {};
+        r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+        await r.handler(req, res, params);
+        return;
       }
-    });
-    server.listen(opts.port, opts.host, () => {
-      const addr = server.address();
-      const port = typeof addr === 'object' && addr ? addr.port : opts.port;
-      resolve({
-        port,
-        close: () => new Promise(r => server.close(() => r())),
-      });
-    });
-    server.once('error', reject);
+      jsonRes(res, 404, { error: 'not_found', path: url.pathname });
+    } catch (err) {
+      logger.error('[dashboard-ipc] handler error', err);
+      if (!res.headersSent) jsonRes(res, 500, { error: String(err) });
+    }
   });
+  // Probe upward on EADDRINUSE instead of a single fixed bind: a second botmux
+  // instance resolving the same IPC port (BOTMUX_DAEMON_IPC_BASE_PORT + idx)
+  // would otherwise reject and take the whole daemon down at startup (the caller
+  // in daemon.ts awaits this unguarded). The daemon republishes the returned
+  // (bound) port into its descriptor so the dashboard still discovers it.
+  return listenWithProbe({
+    server,
+    port: opts.port,
+    host: opts.host,
+    log: (m) => logger.warn(`[dashboard-ipc] ${m}`),
+  }).then((port) => ({
+    port,
+    close: () => new Promise<void>(r => server.close(() => r())),
+  }));
 }
