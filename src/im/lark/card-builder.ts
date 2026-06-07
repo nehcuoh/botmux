@@ -456,9 +456,10 @@ export function buildSlashListCard(
       rows: shown.map((c) => ({ cmd: `\`${c.name}\``, desc: clipDesc(c.description) })),
     });
     if (discovered.length > MAX) {
+      // schema 2.0 卡片已不支持 note 标签（飞书 ErrCode 200861），改用 markdown 元素
       elements.push({
-        tag: 'note',
-        elements: [{ tag: 'lark_md', content: t('slashlist.more', { n: String(discovered.length - MAX) }, locale) }],
+        tag: 'markdown',
+        content: t('slashlist.more', { n: String(discovered.length - MAX) }, locale),
       });
     }
   }
@@ -466,9 +467,10 @@ export function buildSlashListCard(
   // MCP 提示（server 名，prompt 需运行时握手不在此列）
   if (mcpServers.length > 0) {
     elements.push({ tag: 'hr' });
+    // schema 2.0 卡片已不支持 note 标签（飞书 ErrCode 200861），改用 markdown 元素
     elements.push({
-      tag: 'note',
-      elements: [{ tag: 'lark_md', content: t('slashlist.mcp_note', { servers: mcpServers.join(', ') }, locale) }],
+      tag: 'markdown',
+      content: t('slashlist.mcp_note', { servers: mcpServers.join(', ') }, locale),
     });
   }
 
