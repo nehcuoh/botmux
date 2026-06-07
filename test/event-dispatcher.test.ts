@@ -80,7 +80,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
     }
   }
   class MockWSClient {
-    start() {}
+    start = vi.fn(async () => {});
+    getConnectionStatus = vi.fn(() => ({ state: 'connected', reconnectAttempts: 0 }));
   }
   return {
     EventDispatcher: MockEventDispatcher,
@@ -2910,5 +2911,35 @@ describe('ensureBotOpenId — dedup', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(botState.botOpenId).toBe(MY_OPEN_ID);
     vi.unstubAllGlobals();
+  });
+});
+
+describe('startLarkEventDispatcher — 长连接死后自愈 (reconnect-exhausted recovery)', () => {
+  it('SDK 重连耗尽 (state=failed) 时，定时探测并重新 start() 重建长连接', async () => {
+    vi.useFakeTimers();
+    const ws = startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers()) as any;
+    // 启动时的首次握手
+    expect(ws.start).toHaveBeenCalledTimes(1);
+
+    // 模拟主机长断网：SDK 重连预算耗尽、永久放弃，但进程仍 online（PM2 不会兜底）
+    ws.getConnectionStatus.mockReturnValue({ state: 'failed', reconnectAttempts: 9 });
+
+    // 健康检查每 60s 一次：发现 failed → 重新 start() 重建
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ws.start).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
+  it('连接健康 (state=connected) 时不重建，不打断 SDK 自身的重连', async () => {
+    vi.useFakeTimers();
+    const ws = startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers()) as any;
+    expect(ws.start).toHaveBeenCalledTimes(1);
+
+    // getConnectionStatus 默认返回 connected；推进多个周期都不应触发重建
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(ws.start).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
   });
 });
