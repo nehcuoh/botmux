@@ -1567,57 +1567,45 @@ export async function handleCommand(
             await sessionReply(rootId, t('cmd.relay.no_session', undefined, loc));
             break;
           }
-          // ── Chat-type guard ───────────────────────────────────────────────
-          // Picker mode only makes sense in regular group chats. p2p (1:1 with
-          // bot) has no relay concept — there's no other participant to
-          // collaborate with — and topic chats route per-thread, so a chat-
-          // scope session pulled in would have no thread anchor.
-          //
-          // p2p is detectable from `ds.chatType` locally (cheap). Topic vs
-          // regular group is NOT captured in chatType — both record 'group'
-          // — so we hit the Lark API (getChatNameAndMode) to resolve the
-          // mode. One API call per /relay invocation; picker is user-
-          // triggered so latency is acceptable.
+          // ── Chat-type guard + target-routing resolution ───────────────────
+          // p2p (1:1 with bot) has no relay target — there's no other
+          // participant. For group chats we resolve the chat mode (话题群 vs
+          // 普通群) once, then compute WHERE the relayed session should land via
+          // resolveRelayTargetRouting (mirrors decideRouting; 话题群 / 线程内 /
+          // 普通群 new-topic·shared → thread-scope, 普通群 flat → chat-scope).
+          // p2p is also detectable from `ds.chatType` locally (cheap); the API
+          // resolves topic-vs-regular (both record chatType 'group').
           if (ds?.chatType === 'p2p') {
             await sessionReply(rootId, t('cmd.relay.picker_p2p_unsupported', undefined, loc));
             break;
           }
-          {
-            const { getChatNameAndMode } = await import('../im/lark/client.js');
-            const info = await getChatNameAndMode(myAppId, targetChatId).catch(() => null);
-            if (info?.mode === 'p2p') {
-              await sessionReply(rootId, t('cmd.relay.picker_p2p_unsupported', undefined, loc));
-              break;
-            }
-            if (info?.mode === 'topic') {
-              await sessionReply(rootId, t('cmd.relay.picker_topic_unsupported', undefined, loc));
-              break;
-            }
+          const { getChatNameAndMode } = await import('../im/lark/client.js');
+          const info = await getChatNameAndMode(myAppId, targetChatId).catch(() => null);
+          const { resolveRelayTargetRouting } = await import('../im/lark/relay-target-routing.js');
+          const targetRouting = resolveRelayTargetRouting({
+            larkAppId: myAppId,
+            chatId: targetChatId,
+            message: { messageId: message.messageId, rootId: message.rootId || undefined, threadId: message.threadId },
+            chatMode: info?.mode ?? 'group',
+          });
+          if ('reject' in targetRouting) {
+            await sessionReply(rootId, t('cmd.relay.picker_p2p_unsupported', undefined, loc));
+            break;
           }
-          // ── Existing-session guard ────────────────────────────────────────
-          // If this bot already runs a real session in the target chat, pulling
-          // another session in would collide on sessionKey(targetChatId, larkAppId)
-          // — Map.set would silently overwrite, orphaning the existing worker.
-          // Refuse upfront with an actionable message.
-          //
-          // Scratch sessions (the placeholder a `/relay` typed in a fresh chat
-          // gets routed through) are filtered by `!!c.worker` — they have no
-          // worker process. We do NOT exclude `ds` by sessionId: when `/relay`
-          // rides an EXISTING real session (daemon.ts:2034's "existing-session
-          // DAEMON_COMMANDS" path skips the scratch and binds `ds` to the
-          // chat's real session), `ds` itself IS the conflict — excluding it
-          // would let the picker render and the user pick a remote session
-          // that the eventual transferSession would have to refuse anyway.
+          const targetScope = targetRouting.scope;
+          const targetAnchor = targetRouting.anchor;
+          // ── Existing-session guard (anchor-based) ─────────────────────────
+          // A real session already sitting AT the target anchor would collide
+          // on sessionKey(targetAnchor, larkAppId) after transfer — Map.set
+          // would orphan its worker. Scratch placeholders (worker:null, e.g.
+          // the /relay command's own record at this anchor) are NOT a conflict;
+          // transferSession closes them inline. We do NOT exclude `ds`: if
+          // /relay rides an existing real session at the anchor, `ds` itself IS
+          // the conflict. Anchor-based so同群 other-topic sessions (different
+          // anchor) don't false-positive — that's what enables 同群话题间搬运.
           const conflict = [...activeSessions.values()].find(c =>
             c.larkAppId === myAppId
-            && c.chatId === targetChatId
-            // chat-scope only: thread-scope sessions (e.g. a `/t` force-topic
-            // session in a regular group) live at a different sessionKey
-            // anchor (rootMessageId), so they don't collide on transfer.
-            // transferSession's own pre-flight (worker-pool.ts) and card-
-            // handler's confirm both filter the same way; align here so the
-            // picker doesn't false-positive a thread-scope live session.
-            && c.scope === 'chat'
+            && sessionAnchorId(c) === targetAnchor
             && !!c.worker   // real running session, not a placeholder
           );
           if (conflict) {
@@ -1627,12 +1615,12 @@ export async function handleCommand(
           // Shared candidate-collection logic — used here at initial render
           // and again in card-handler when the user clicks a card to switch
           // selection (the card re-render needs the same filtered list).
-          // Filters out: other bots / current chat / non-owned / adopt
-          // sessions. Resolves friendly chat names + modes in parallel.
+          // Excludes (by anchor) the target itself; keeps cross-group + 同群
+          // other-topic sessions. Resolves friendly chat names + modes.
           const { collectRelayPickerEntries } = await import('../services/relay-picker.js');
-          const entries = await collectRelayPickerEntries(activeSessions, myAppId, targetChatId, operatorOpenId);
+          const entries = await collectRelayPickerEntries(activeSessions, myAppId, targetAnchor, operatorOpenId);
           const { buildRelayPickerCard } = await import('../im/lark/card-builder.js');
-          const card = buildRelayPickerCard(entries, targetChatId, rootId, operatorOpenId, loc);
+          const card = buildRelayPickerCard(entries, targetChatId, targetAnchor, operatorOpenId, loc, undefined, targetScope);
           await sessionReply(rootId, card, 'interactive');
           break;
         }
@@ -1837,8 +1825,8 @@ export async function handleCommand(
         if (leaderHasRealSession) {
           const { transferSession } = await import('./worker-pool.js');
           // Target chat was just built by createGroupWithBots — by
-          // construction a regular group.
-          const leaderResult = await transferSession(ds.session.sessionId, newChatId, placeholderRootMessageId, 'group');
+          // construction a regular group, chat-scope.
+          const leaderResult = await transferSession(ds.session.sessionId, newChatId, placeholderRootMessageId, 'group', 'chat');
           if (!leaderResult.ok) {
             // Real session, real failure (worker busy / unsupported target
             // / tmux issue). Abort the entire --create flow — the new chat

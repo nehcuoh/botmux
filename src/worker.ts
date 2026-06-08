@@ -69,7 +69,7 @@ import { tmuxEnv } from './setup/ensure-tmux.js';
 import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
-import { snapshotToPng, snapshotToText } from './utils/transient-snapshot.js';
+import { snapshotToPng, snapshotToText, shouldCaptureScreen, isScreenSelfDriven } from './utils/transient-snapshot.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import { parseWorkerRequestUrl } from './utils/worker-http.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
@@ -119,7 +119,7 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -2866,36 +2866,61 @@ function startScreenUpdates(): void {
   renderer = new TerminalRenderer(renderCols, renderRows);
   let lastSentStatus: string | undefined;
   let lastTextSnapshotHash = '';
+  let lastContent = '';
+  // PTY-activity watermark of the last tick that actually captured. The screen
+  // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
+  // and feeds the renderer in the same place), so when this hasn't advanced the
+  // screen is byte-identical to lastContent and a capture is pure waste.
+  // Exception: an observe backend that paused its emission poller for a live
+  // web-attach (isScreenSelfDriven) keeps changing without bumping the
+  // watermark — there we must capture every tick (see shouldCaptureScreen).
+  let lastSnapshotPtyActivity = -1;
   screenUpdateTimer = setInterval(() => {
     if (awaitingFirstPrompt) return;
     let status: RuntimeScreenStatus = isPromptReady ? 'idle' : 'working';
     if (screenAnalyzer?.isAnalyzing) status = 'analyzing';
 
     void (async () => {
-      let content: string;
-      let changed: boolean;
+      let content = lastContent;
+      let changed = false;
 
-      // Preferred path: pipe-pane backends pull a fresh viewport snapshot
-      // from tmux every tick. This eliminates the accumulated-buffer drift
-      // that produced duplicated/staircase text in 'text' display mode.
-      const pipeText = await snapshotToText(backend, renderCols, renderRows, { filter: true });
-      if (pipeText) {
-        content = pipeText.content;
-        const hash = pipeText.ansi;
-        changed = hash !== lastTextSnapshotHash;
-        lastTextSnapshotHash = hash;
-        // Refresh the unfiltered cache that ScreenAnalyzer reads from. Same
-        // tmux call would otherwise need to fire twice per tick.
-        if (changed) {
-          const rawSnap = await snapshotToText(backend, renderCols, renderRows, { filter: false });
-          if (rawSnap) lastAnalyzerSnapshot = rawSnap.content;
+      // Capture only when the pane has emitted output since our last snapshot.
+      // During idle (the steady state for a parked session) this skips a tmux
+      // capture-pane + a throwaway xterm-headless instantiation every tick —
+      // the dominant per-session background cost — while the status-transition
+      // send below still fires off the cached content. The exception is a
+      // self-driven screen (observe backend with a live web-attach): the
+      // watermark can't be trusted there, so capture every tick.
+      const ptyActivity = lastPtyActivityAtMs;
+      if (shouldCaptureScreen({
+        ptyActivity,
+        lastCapturedPtyActivity: lastSnapshotPtyActivity,
+        screenSelfDriven: isScreenSelfDriven(backend),
+      })) {
+        lastSnapshotPtyActivity = ptyActivity;
+        // Preferred path: pipe-pane backends pull a fresh viewport snapshot
+        // from tmux every tick. This eliminates the accumulated-buffer drift
+        // that produced duplicated/staircase text in 'text' display mode.
+        const pipeText = await snapshotToText(backend, renderCols, renderRows, { filter: true });
+        if (pipeText) {
+          content = pipeText.content;
+          const hash = pipeText.ansi;
+          changed = hash !== lastTextSnapshotHash;
+          lastTextSnapshotHash = hash;
+          // Refresh the unfiltered cache that ScreenAnalyzer reads from. Same
+          // tmux call would otherwise need to fire twice per tick.
+          if (changed) {
+            const rawSnap = await snapshotToText(backend, renderCols, renderRows, { filter: false });
+            if (rawSnap) lastAnalyzerSnapshot = rawSnap.content;
+          }
+        } else if (renderer) {
+          const snap = renderer.snapshot();
+          content = snap.content;
+          changed = snap.changed;
+        } else {
+          return;
         }
-      } else if (renderer) {
-        const snap = renderer.snapshot();
-        content = snap.content;
-        changed = snap.changed;
-      } else {
-        return;
+        lastContent = content;
       }
 
       const usageAware = usageLimitTracker.classify(content, status);

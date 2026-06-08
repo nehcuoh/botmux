@@ -294,6 +294,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const loc = localeForBot(larkAppId);
     const targetChatId = value.target_chat_id;
     const targetRootId = value.root_id;
+    // root_id IS the relay target anchor (chatId for chat-scope, 话题 root for
+    // thread-scope). target_scope tells the confirm/re-render which it is.
+    const targetScope = (value.target_scope as 'thread' | 'chat') ?? 'chat';
     const invokerOpenId = value.invoker_open_id as string | undefined;
     if (!targetChatId || !targetRootId || !operatorOpenId) {
       return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: 'missing_value' }, loc) } };
@@ -333,8 +336,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       nextSelected = value.session_id;
     }
 
+    // Exclude by the target ANCHOR (root_id), not chatId — keeps 同群 other-
+    // topic sessions in the candidate list on re-render, matching初次渲染.
     const { collectRelayPickerEntries } = await import('../../services/relay-picker.js');
-    const entries = await collectRelayPickerEntries(activeSessions, larkAppId, targetChatId, operatorOpenId);
+    const entries = await collectRelayPickerEntries(activeSessions, larkAppId, targetRootId, operatorOpenId);
     const { buildRelayPickerCard } = await import('./card-builder.js');
     const cardJson = buildRelayPickerCard(
       entries,
@@ -352,6 +357,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         searchQuery: nextSearch,
         page: nextPage,
       },
+      targetScope,
     );
     // Return an updated card body — event-dispatcher wraps this as
     // { card: { type: 'raw', data: <body> } } so Lark patches the picker
@@ -454,6 +460,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const sourceSessionId = value.session_id;
     const targetChatId = value.target_chat_id;
     const targetRootId = value.root_id;
+    // root_id IS the target anchor for thread-scope (the 话题 root); for chat-
+    // scope the anchor is chatId and root_id is unused for routing.
+    const targetScope = (value.target_scope as 'thread' | 'chat') ?? 'chat';
+    const targetAnchor = targetScope === 'chat' ? targetChatId : targetRootId;
     const invokerOpenId = value.invoker_open_id as string | undefined;
     if (!sourceSessionId || !targetChatId || !targetRootId) {
       return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: 'missing_value' }, loc) } };
@@ -483,7 +493,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (sourceDs.session.ownerOpenId && sourceDs.session.ownerOpenId !== operatorOpenId) {
       return { toast: { type: 'error', content: t('card.relay.toast_not_owner', undefined, loc) } };
     }
-    if (sourceDs.chatId === targetChatId) {
+    // Anchor-based self-relay guard: a thread-scope source in the SAME chat
+    // (different 话题) is a legitimate cross-topic move, so refuse only when the
+    // source and target anchors are identical.
+    if (sessionAnchorId(sourceDs) === targetAnchor) {
       return { toast: { type: 'error', content: t('card.relay.toast_same_chat', undefined, loc) } };
     }
     // Real-session preflight — done BEFORE M1 send so a refusal doesn't
@@ -506,8 +519,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const targetConflict = [...activeSessions.values()].find(c =>
       c !== sourceDs
       && c.larkAppId === larkAppId
-      && c.chatId === targetChatId
-      && c.scope === 'chat'
+      && sessionAnchorId(c) === targetAnchor
       && !!c.worker
     );
     if (targetConflict) {
@@ -527,21 +539,27 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // back to the raw chatId if Lark can't return a name.
     const { getChatName } = await import('./client.js');
     const sourceLabel = (await getChatName(larkAppId, sourceDs.chatId)) ?? sourceDs.chatId;
-    // Send the M1 announcement — its message_id becomes the new
-    // rootMessageId after the transfer (mirrors /relay --create's flow).
+    // Send the M1 announcement.
+    //   chat-scope: a plain top-level message; its id becomes the (audit-only)
+    //               rootMessageId after the transfer (mirrors /relay --create).
+    //   thread-scope: reply_in_thread INTO the target 话题 (anchor) so the
+    //               announcement lands in the 话题; the session anchors on the
+    //               话题 root (targetAnchor), NOT the M1 id.
     let m1MessageId: string;
     try {
       const m1Text = t('cmd.relay.m1_announce', { sourceChat: sourceLabel, groupName: targetChatId }, loc);
-      m1MessageId = await sendMessage(larkAppId, targetChatId, m1Text, 'text');
+      m1MessageId = targetScope === 'thread'
+        ? await replyMessage(larkAppId, targetAnchor, m1Text, 'text', /*replyInThread*/ true)
+        : await sendMessage(larkAppId, targetChatId, m1Text, 'text');
     } catch (err: any) {
       return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: err?.message ?? 'send_m1_failed' }, loc) } };
     }
     const { transferSession } = await import('../../core/worker-pool.js');
-    // Target is always a regular group in the picker path — picker-mode's
-    // entry guard in command-handler.ts refused p2p / topic before the card
-    // even rendered. Passing literal 'group' here makes that contract
-    // explicit at the call site.
-    const r = await transferSession(sourceDs.session.sessionId, targetChatId, m1MessageId, 'group');
+    // chat-scope → anchor on the M1 id (audit-only); thread-scope → anchor on
+    // the 话题 root (targetAnchor) so future replies in the 话题 route here.
+    const r = targetScope === 'thread'
+      ? await transferSession(sourceDs.session.sessionId, targetChatId, targetAnchor, 'group', 'thread')
+      : await transferSession(sourceDs.session.sessionId, targetChatId, m1MessageId, 'group', 'chat');
     if (!r.ok) {
       // Best-effort: orphan M1 cleanup so a failed transfer doesn't leave a
       // misleading "已接力" message in the target chat (王皓's "明明失败了

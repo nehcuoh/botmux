@@ -11,6 +11,7 @@ import {
   botDisplayName,
   botAvatarHtml,
   chatDisplayTitle,
+  attentionWaitSince,
   escapeHtml,
   loadNameMaps,
   relTime,
@@ -37,6 +38,7 @@ const CLI_FILTER_OPTIONS = [
   'copilot',
   'aiden',
   'coco',
+  'oh-my-pi',
   'unknown',
 ];
 
@@ -69,7 +71,7 @@ function terminalHref(s: any): string | null {
 
 function deriveSessionBoardColumn(s: any): BoardColumnId | null {
   if (s.status === 'closed') return null;
-  if (s.pendingRepo || s.tuiPromptActive || s.status === 'limited') return 'needs-you';
+  if (s.pendingRepo || s.tuiPromptActive || s.agentAttention || s.status === 'limited') return 'needs-you';
   if (s.status === 'starting') return 'starting';
   if (s.status === 'working' || s.status === 'analyzing' || s.status === 'active') return 'working';
   return 'idle';
@@ -227,6 +229,10 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   function boardSignalLabel(s: any): string {
+    // Agent-raised reason is the most informative — show it verbatim so the
+    // human sees *why* the task is stuck, not a generic label.
+    if (s.agentAttention?.reason) return s.agentAttention.reason;
+    if (s.agentAttention) return t('sessions.board.signalAgent');
     if (s.pendingRepo) return t('sessions.board.signalRepo');
     if (s.tuiPromptActive) return t('sessions.board.signalPrompt');
     if (s.status === 'limited') return t('sessions.board.signalLimited');
@@ -242,6 +248,7 @@ export function renderSessionsPage(root: HTMLElement) {
     const chatTitle = chatDisplayTitle(s);
     const terminal = terminalHref(s);
     const signal = boardSignalLabel(s);
+    const repo = repoBasename(s.workingDir);
     return `<article class="session-card${isSelected ? ' selected' : ''}" data-id="${escapeHtml(s.sessionId)}" aria-pressed="${isSelected}">
       <div class="session-card-top">
         ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
@@ -251,14 +258,16 @@ export function renderSessionsPage(root: HTMLElement) {
         </div>
         <span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>
       </div>
-      <div class="session-card-meta">
-        <span title="${escapeHtml(s.workingDir ?? '')}">${escapeHtml(repoBasename(s.workingDir))}</span>
+      ${repo !== '-' || s.adopt ? `<div class="session-card-meta">
+        ${repo !== '-' ? `<span title="${escapeHtml(s.workingDir ?? '')}">${escapeHtml(repo)}</span>` : ''}
         ${s.adopt ? '<span class="badge">adopt</span>' : ''}
-      </div>
+      </div>` : ''}
       <div class="session-card-time">
-        <span>${escapeHtml(t('sessions.last'))}: ${relTime(s.lastMessageAt)}</span>
-        ${signal ? `<span class="session-signal">${escapeHtml(signal)} · ${relTime(s.lastMessageAt)}</span>` : ''}
+        <span>${s.agentAttention?.at
+          ? `${escapeHtml(t('sessions.board.waiting'))} ${relTime(attentionWaitSince(s))}`
+          : `${escapeHtml(t('sessions.last'))}: ${relTime(s.lastMessageAt)}`}</span>
       </div>
+      ${signal ? `<div class="session-signal" title="${escapeHtml(signal)}">${escapeHtml(signal)}</div>` : ''}
       <div class="session-card-actions">
         ${chatScopeLink(s) ?? `<button type="button" data-action="locate">${t('sessions.locate')}</button>`}
         <button type="button" data-action="details">${t('sessions.details')}</button>
@@ -269,8 +278,8 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   function compareBoardRows(a: any, b: any, column: BoardColumnId): number {
-    const av = Number(a.lastMessageAt ?? 0);
-    const bv = Number(b.lastMessageAt ?? 0);
+    const av = column === 'needs-you' ? attentionWaitSince(a) : Number(a.lastMessageAt ?? 0);
+    const bv = column === 'needs-you' ? attentionWaitSince(b) : Number(b.lastMessageAt ?? 0);
     if (av !== bv) return column === 'needs-you' ? av - bv : bv - av;
     return String(a.title ?? a.sessionId).localeCompare(String(b.title ?? b.sessionId));
   }

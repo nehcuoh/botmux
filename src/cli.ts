@@ -52,7 +52,7 @@ import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { logger } from './utils/logger.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
-import { dispatchPrimaryMessage } from './cli/send-dispatch.js';
+import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments } from './cli/send-dispatch.js';
 import {
   formatBotInfoEntriesForCli,
   formatChatBotsForCli,
@@ -660,7 +660,7 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   }
   console.log('✅ 凭证有效（tenant_access_token 已成功获取）\n');
 
-  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot');
+  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot  17) oh-my-pi');
   const cliChoice = await ask(rl, 'CLI 适配器 [1]: ');
   let cliId: CliId;
   try {
@@ -762,7 +762,7 @@ async function promptEditBotConfig(
   ]);
   input.larkAppSecret = await ask(rl, `LARK_APP_SECRET [保留当前值]: `);
 
-  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot');
+  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot  17) oh-my-pi');
   printInputHelp('CLI 适配器', [
     '选择 botmux 需要套用哪一种 CLI 参数协议和会话恢复方式。',
     'coco 的别名 traecli 走同一适配器；二进制名是 traecli 也选 coco 即可。',
@@ -2354,6 +2354,12 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --voice "<口语文字>"            合成语音气泡发出（需先 botmux voice 配置 TTS）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
+       --attention[=kind]              举手：发消息的同时把本会话标进 dashboard
+                                       「需要你」列并通知你——撞到只有你能解的硬阻碍
+                                       （授权/拍板/缺权限）无法继续时用。消息正文即看板
+                                       原因。kind=authz|decision|blocked(默认)|help。
+                                       仅限回复当前会话，不能与 --top-level/--chat-id/--into
+                                       /--voice 混用；用户回复后自动撤下。
        --anyway                        跳过「@ 到活跃子 bot」护栏强发（见下）
     @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
     按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
@@ -2814,7 +2820,7 @@ import { buildCardBodyElements, brandFooterSegment } from './im/lark/md-card.js'
 import { COMPLETED_REACTION_EMOJI_TYPE, claimPendingResponseCard, isPendingResponseCardOpen, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState, shouldMarkPendingAsMentionedSend, shouldPatchPendingOnExplicitSend } from './core/pending-response.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
-import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
+import { resolveQuoteTarget, validateMentionDecision, parseAttentionFlag, attentionUsageError } from './services/send-policy.js';
 
 async function cmdSend(rest: string[]): Promise<void> {
   // Safety gate: a CLI agent running inside a workflow subagent (Slice F)
@@ -2836,10 +2842,23 @@ async function cmdSend(rest: string[]): Promise<void> {
   const sessionIdArg = argValue(rest, '--session-id');
   const images = argValues(rest, '--image', '--images');
   const files = argValues(rest, '--file', '--files');
+  // stdin can't be both the message body (which `botmux send` reads from it) and
+  // a `--file`/`--image` attachment — the second read sees EOF and the upload
+  // fails *after* the message is already sent, leaving the caller to resend.
+  // Reject up front so exit≠0 reliably means "nothing was sent".
+  const stdinAlias = findStdinAliasAttachment([...images, ...files]);
+  if (stdinAlias) {
+    console.error(
+      `不能把 stdin（${stdinAlias}）当作 --file/--image 附件：botmux send 已从 stdin 读取消息正文，\n` +
+      `同一个 stdin 没法既当正文又当附件（第二次读到的是 EOF）。\n` +
+      `要发送管道内容，先落到临时文件：  数据来源 > /tmp/x && botmux send --files /tmp/x …`,
+    );
+    process.exit(1);
+  }
   const mentionArgs = argValues(rest, '--mention');  // "open_id:Display Name"
   const contentFile = argValue(rest, '--content-file');
-  // 回复一律走交互卡片。`--card` / `--text` 仅为向后兼容被容忍并忽略：纯文本 post
-  // 路径已删除——只有卡片能承载「🔊 语音总结」按钮，且守护进程兜底也一直只发卡片。
+  // 回复一律走交互卡片。`--card` / `--text` 是隐藏的旧脚本兼容 no-op：纯文本
+  // post 路径已删除，只有卡片能承载「🔊 语音总结」按钮，且守护进程兜底也一直只发卡片。
   // Publish-mode flags: post a fresh top-level message in a chat instead of
   // replying into the bound thread. Lets a session "publish" to a different
   // chat (e.g. a public release-notes group) while keeping its own thread
@@ -2861,6 +2880,10 @@ async function cmdSend(rest: string[]): Promise<void> {
   // @ hard-gate: every reply must explicitly choose one of these.
   const mentionBack = rest.includes('--mention-back');
   const noMention = rest.includes('--no-mention');
+  // --attention[=kind]: raise a hand — post this message AND light the dashboard
+  // needs-you column for this session. Parsed specially (not argValue) so a bare
+  // `--attention "我卡住了"` doesn't eat the message as the flag value.
+  const attention = parseAttentionFlag(rest);
 
   const ancestorCtx = findAncestorSessionContext();
   const sid = sessionIdArg ?? ancestorCtx?.sessionId ?? null;
@@ -2881,7 +2904,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
     content = readFileSync(contentFile, 'utf-8');
   } else {
-    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway', '--voice']);
+    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway', '--voice', '--attention']);
     if (pos.length > 0) {
       content = pos.join(' ');
     } else {
@@ -2893,6 +2916,18 @@ async function cmdSend(rest: string[]): Promise<void> {
     console.error('没有内容可发送。用法:\n  echo "消息" | botmux send\n  botmux send "消息"\n  botmux send --content-file /tmp/msg.md --images /tmp/chart.png');
     process.exit(1);
   }
+
+  // --attention guard: only valid replying into the current session with a text
+  // reason (clear-on-reply binds to this anchor; dashboard needs a reason).
+  const attentionErr = attentionUsageError({
+    requested: attention.requested,
+    sendTopLevel,
+    overrideChatId,
+    sendInto,
+    asVoice,
+    hasText: !!content.trim(),
+  });
+  if (attentionErr) { console.error(`botmux send: ${attentionErr}`); process.exit(2); }
 
   // ── Voice mode ──────────────────────────────────────────────────────────
   // Synthesize the (already-condensed, colloquial) content into a Feishu voice
@@ -3412,12 +3447,16 @@ async function cmdSend(rest: string[]): Promise<void> {
     // closed a pending response card for this turn.
     if (shouldRecordBridgeMarker) recordBridgeSendMarker(sentAtMs, messageId, text);
 
-    // Send file attachments as separate messages
-    const fileIds: string[] = [];
-    for (const fp of files) {
-      const fileKey = await uploadFile(appId, fp);
-      const fid = await dispatch(JSON.stringify({ file_key: fileKey }), 'file');
-      fileIds.push(fid);
+    // Send file attachments as separate messages — best-effort. The primary
+    // message is already delivered above; a failing attachment must not throw
+    // out to the catch below (which would report total failure / exit 1 for an
+    // already-sent message and make the caller resend). Warn instead, and list
+    // the failures in the success JSON.
+    const { failed: failedAttachments } = await sendFileAttachments(
+      { uploadFile, dispatch }, appId, files,
+    );
+    for (const f of failedAttachments) {
+      console.error(`⚠️ 附件未发送（主消息已送达 ${messageId}，请勿重发）: ${f.path} — ${f.error}`);
     }
 
     // Bot-to-bot 转发依赖飞书"获取群组中其他机器人和用户@当前机器人的消息"权限：
@@ -3430,12 +3469,42 @@ async function cmdSend(rest: string[]): Promise<void> {
       ? `@${mentions.map(m => m.name || m.open_id).join(',')}`
       : '未@任何人';
     console.error(`✓ 已发送 ${messageId} ｜ ${primaryQuotedId ? `引用 ${primaryQuotedId}` : '未引用'} ｜ ${atSummary}`);
+
+    // --attention: message is already delivered above; now flip the dashboard
+    // needs-you state via the daemon (botmux send is direct-to-Lark, so the
+    // daemon-held ds.agentAttention must be set out-of-band). Best-effort: a
+    // failure here must NOT fail the send (else the agent retries → duplicate
+    // messages) — warn on stderr and surface in the JSON for log observability.
+    let attentionRaised: boolean | undefined;
+    let attentionError: string | undefined;
+    if (attention.requested) {
+      try {
+        const daemon = findDaemon(appId);
+        if (!daemon) throw new Error(`找不到 daemon (larkAppId=${appId})`);
+        const res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/attention`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: sid, larkAppId: appId, action: 'raise', kind: attention.kind, reason: text.trim() }),
+        });
+        if (!res.ok) throw new Error(`daemon HTTP ${res.status}`);
+        attentionRaised = true;
+        console.error(`🙋 已举手：本会话已进 dashboard「需要你」列（用户回复后自动撤下）`);
+      } catch (err) {
+        attentionRaised = false;
+        attentionError = err instanceof Error ? err.message : String(err);
+        console.error(`⚠️ 消息已发送，但举手(needs-you)置位失败（不影响消息）：${attentionError}`);
+      }
+    }
     console.log(JSON.stringify({
       success: true,
       messageId,
       sessionId: sid,
       quotedMessageId: primaryQuotedId,
       mentioned: mentions.map(m => ({ open_id: m.open_id, name: m.name })),
+      ...(attention.requested ? { attentionRaised, attentionError } : {}),
+      ...(failedAttachments.length > 0
+        ? { failedAttachments: failedAttachments.map(f => f.path) }
+        : {}),
     }));
   } catch (err: any) {
     console.error(`发送失败: ${err.message}`);

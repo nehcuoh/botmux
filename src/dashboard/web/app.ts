@@ -12,7 +12,7 @@ import { renderSettingsPage } from './settings.js';
 import { renderWorkflowsPage } from './workflows.js';
 import { renderWorkflowCatalogPage } from './workflow-catalog.js';
 import { wireBotOnboardingButton } from './bot-onboarding.js';
-import { attentionReason, botDisplayName, escapeHtml, loadNameMaps, relTime, t, ui } from './ui.js';
+import { attentionReason, attentionWaitSince, botDisplayName, escapeHtml, loadNameMaps, relTime, t, ui } from './ui.js';
 import { initThemeMenu, paintThemeMenu } from './theme-menu.js';
 import type { DashboardLocale } from './i18n.js';
 
@@ -119,7 +119,7 @@ function paintAttentionStrip(): void {
   const pending = [...store.sessions.values()]
     .map(s => ({ s, reason: attentionReason(s) }))
     .filter((x): x is { s: any; reason: string } => !!x.reason)
-    .sort((a, b) => Number(a.s.lastMessageAt ?? 0) - Number(b.s.lastMessageAt ?? 0));
+    .sort((a, b) => attentionWaitSince(a.s) - attentionWaitSince(b.s));
   if (pending.length === 0) {
     el.hidden = true;
     el.innerHTML = '';
@@ -131,7 +131,7 @@ function paintAttentionStrip(): void {
     <span class="attention-strip-ic" aria-hidden="true">!</span>
     <b>${escapeHtml(t('strip.pending', { count: pending.length }))}</b>
     <span class="attention-strip-longest">${escapeHtml(t('strip.longest', {
-      time: relTime(longest.s.lastMessageAt),
+      time: relTime(attentionWaitSince(longest.s)),
       bot: botDisplayName(longest.s),
       reason: longest.reason,
     }))}</span>

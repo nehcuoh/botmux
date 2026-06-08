@@ -132,7 +132,7 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
   ),
   buildSlashListCard: vi.fn((params: any) => JSON.stringify(params)),
   buildRelayPickerCard: vi.fn(
-    (entries: any[], targetChatId: string, rootMessageId: string) => JSON.stringify({
+    (entries: any[], targetChatId: string, rootMessageId: string, _invokerOpenId?: string, _locale?: any, _state?: any, targetScope?: string) => JSON.stringify({
       schema: '2.0',
       body: {
         elements: entries.length === 0 ? [
@@ -141,7 +141,7 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
           tag: 'interactive_container',
           behaviors: [{
             type: 'callback',
-            value: { action: 'relay_select', session_id: e.sessionId, target_chat_id: targetChatId, root_id: rootMessageId },
+            value: { action: 'relay_select', session_id: e.sessionId, target_chat_id: targetChatId, root_id: rootMessageId, target_scope: targetScope ?? 'chat' },
           }],
           elements: [{ tag: 'markdown', content: `**${e.title}**\n${e.chatMode ?? 'group'}\n${e.chatLabel}` }],
         })),
@@ -1921,9 +1921,10 @@ describe('handleCommand', () => {
       expect(reply).not.toContain('选择要接力');
     });
 
-    it('picker refuses upfront in topic chats (getChatNameAndMode → topic)', async () => {
-      // Topic chats record chatType='group' locally — must be resolved via
-      // Lark API. Force the mock to report 'topic' for this scenario.
+    it('renders the picker in topic chats with a thread-scope target (no longer refused)', async () => {
+      // Topic chats record chatType='group' locally — resolved via Lark API.
+      // Force 'topic'; the picker must now RENDER and bake a thread-scope
+      // target anchored at the /relay message id (a fresh 话题 seed).
       const { getChatNameAndMode } = await import('../src/im/lark/client.js');
       vi.mocked(getChatNameAndMode).mockResolvedValueOnce({ name: 'Topic Room', mode: 'topic' });
 
@@ -1932,9 +1933,14 @@ describe('handleCommand', () => {
 
       await handleCommand('/relay', ROOT_ID, makeLarkMessage('/relay'), deps, LARK_APP_ID);
 
-      const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-      expect(reply).toMatch(/话题群不支持|not supported in topic/);
-      expect(reply).not.toContain('选择要接力');
+      const [, replyContent, msgType] = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(msgType).toBe('interactive');
+      expect(String(replyContent)).not.toMatch(/话题群不支持|not supported in topic/);
+      const card = JSON.parse(replyContent as string);
+      const containerValue = card.body.elements.find((e: any) => e.tag === 'interactive_container')?.behaviors?.[0]?.value;
+      expect(containerValue?.target_scope).toBe('thread');
+      // 话题群 top-level → anchor = the /relay message id (makeLarkMessage → 'msg_001').
+      expect(containerValue?.root_id).toBe('msg_001');
     });
 
     it('picker refuses upfront when this chat already has an active session for the bot', async () => {
@@ -2112,7 +2118,7 @@ describe('handleCommand', () => {
       // settle. The leader's session.rootMessageId is patched to the real
       // M1 id later, see the m1_final_all_ok / m1_final_partial flow.
       const wp = await import('../src/core/worker-pool.js');
-      expect(wp.transferSession).toHaveBeenCalledWith('sess-001', 'oc_new_group', 'oc_new_group', 'group');
+      expect(wp.transferSession).toHaveBeenCalledWith('sess-001', 'oc_new_group', 'oc_new_group', 'group', 'chat');
 
       // Peer migrate-to-chat was POSTed exactly once.
       expect(fetchSpy).toHaveBeenCalledTimes(1);
