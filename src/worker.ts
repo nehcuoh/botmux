@@ -19,6 +19,7 @@ import { drainTranscript, joinAssistantText, findJsonlContainingFingerprint, fin
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { shouldWriteNow } from './utils/input-gate.js';
+import { InflightInputTracker } from './core/inflight-input-tracker.js';
 import {
   shouldRunQuietRotation,
   evaluatePidResolverPullback,
@@ -127,6 +128,9 @@ let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
 let isFlushing = false;
 const pendingMessages: Array<{ content: string; turnId?: string }> = [];
+/** Inputs written to the CLI whose turn hasn't completed — re-queued across a
+ *  CLI crash so a submit-time death can't silently eat user messages. */
+const inflightInputs = new InflightInputTracker();
 /** Alternate submit-confirmation signals. Some CLIs can consume PTY input and
  *  start work before their history/transcript submit marker is observable. */
 let lastPtyActivityAtMs = 0;
@@ -2561,6 +2565,10 @@ function onPtyData(data: string): void {
 function markPromptReady(): void {
   if (isPromptReady) return;  // guard against duplicate calls
   isPromptReady = true;
+  // CLI is back at its prompt — every previously written input has been
+  // consumed, so nothing is in flight anymore. A later crash must not
+  // replay these.
+  inflightInputs.onTurnComplete();
   maybeEmitWorkflowTranscriptOutput();
   if (awaitingFirstPrompt) {
     awaitingFirstPrompt = false;
@@ -2751,6 +2759,9 @@ async function flushPending(): Promise<void> {
   try {
     while (pendingMessages.length > 0 && backend && cliAdapter) {
       const item = pendingMessages.shift()!;
+      // Track as in-flight until the CLI returns to idle (markPromptReady).
+      // If the CLI exits first, onExit stashes these for re-queue on respawn.
+      inflightInputs.onWrite(item);
       const msg = item.content;
       currentBotmuxTurnId = item.turnId;
       writeCliPidMarker();
@@ -3090,6 +3101,18 @@ function seedBackendScreen(source: string, be: Pick<SessionBackend, 'captureCurr
 }
 
 function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+  // Re-deliver inputs that were in-flight when the previous CLI died (see
+  // backend.onExit). killCli() already wiped pendingMessages, so these go to
+  // the front; the normal flush paths (prompt detect / first-prompt timeout)
+  // deliver them once the fresh CLI is ready. Adopt mode observes a CLI we
+  // don't own — never replay into it.
+  if (!cfg.adoptMode) {
+    const carry = inflightInputs.takeCarryOver();
+    if (carry.length > 0) {
+      pendingMessages.unshift(...carry);
+      log(`Re-queued ${carry.length} in-flight message(s) lost to CLI exit`);
+    }
+  }
   // ── Adopt mode: observe the user's existing terminal backend (no attach) ──
   if (cfg.adoptMode && cfg.adoptSource === 'herdr' && cfg.adoptHerdrSessionName && (cfg.adoptHerdrPaneId || cfg.adoptHerdrTarget)) {
     isTmuxMode = false;
@@ -3546,6 +3569,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   backend.onData(onPtyData);
   backend.onExit((code, signal) => {
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
+    // Inputs written but not yet consumed (no idle since the write) die with
+    // the CLI — codex crashing mid-submit never records them, and the fresh
+    // respawn comes up empty. Stash them so the next spawnCli re-queues and
+    // re-delivers.
+    const stashed = inflightInputs.onCliExit();
+    if (stashed > 0) {
+      log(`CLI exited with ${stashed} in-flight message(s); will re-queue after restart`);
+    }
     backend = null;
     isPromptReady = false;
     send({ type: 'claude_exit', code, signal });
