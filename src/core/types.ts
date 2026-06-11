@@ -50,6 +50,7 @@ export interface DaemonSession {
   initConfig?: Extract<DaemonToWorker, { type: 'init' }>;   // stored for restart
   pendingRepo?: boolean;         // waiting for repo selection before spawning CLI
   repoCardMessageId?: string;    // message_id of the repo selection card — for withdrawal
+  worktreeCreating?: boolean;    // a worktree-open is in flight — dedups repeated card clicks / `/repo wt`
   pendingPrompt?: string;        // original user message to send after repo is selected
   pendingAttachments?: LarkAttachment[];
   pendingMentions?: LarkMention[];    // @mentions from initial message, used when building prompt after repo selection

@@ -11,6 +11,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
+import { createRepoWorktree } from '../services/git-worktree.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
 import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
@@ -1018,6 +1019,7 @@ export async function handleCommand(
         const forkPendingCli = async (replyText: string) => {
           const selfBot = getBot(ds!.larkAppId);
           const botCfg = selfBot.config;
+          const commitGenSessionId = ds!.session.sessionId;
           ds!.pendingRepo = false;
           publishAttentionPatch(ds!);
           const pendingPrompt = ds!.pendingPrompt ?? '';
@@ -1045,6 +1047,15 @@ export async function handleCommand(
               ds!.pendingSender,
               { larkAppId, chatId: ds!.chatId },
             );
+            // Last-line defence: prompt prep awaited above — if anything
+            // replaced OR closed the session in that window (`/close` deletes
+            // the active-map entry without touching sessionId), forking now
+            // would clobber it or resurrect a closed session.
+            const stillActive = activeSessions.get(sessionKey(rootId, larkAppId!)) === ds;
+            if (!stillActive || ds!.session.sessionId !== commitGenSessionId) {
+              logger.warn(`[${logTag}] Session replaced or closed while preparing the pending-CLI prompt (${commitGenSessionId} → ${ds!.session.sessionId}, active=${stillActive}) — aborting this fork`);
+              return;
+            }
             rememberLastCliInput(ds!, pendingPrompt, prompt);
             forkWorker(ds!, prompt);
           } else {
@@ -1091,6 +1102,106 @@ export async function handleCommand(
           }
           logger.info(`[${logTag}] Repo selected via ${how}: ${selectedPath}`);
         };
+
+        // `/repo wt <N|name|path> [branch]` → create a worktree off the repo's
+        // remote default branch and open THAT as the session repo. Without a
+        // branch arg the branch/dir are auto-named (wt/N, <repo>-wt-N).
+        if (ds && /^wt(\s|$)/i.test(repoArg)) {
+          const rest = repoArg.replace(/^wt\s*/i, '').trim().split(/\s+/).filter(Boolean);
+          if (rest.length < 1 || rest.length > 2) {
+            await sessionReply(rootId, t('cmd.repo.worktree_usage', undefined, loc));
+            break;
+          }
+          const [targetArg, branchArg] = rest;
+          let repoPath: string;
+          if (/^\d+$/.test(targetArg!)) {
+            const cached = lastRepoScan.get(ds.chatId);
+            if (!cached || cached.length === 0) {
+              await sessionReply(rootId, t('cmd.repo.no_prior_scan', undefined, loc));
+              break;
+            }
+            const repoIndex = parseInt(targetArg!, 10);
+            if (repoIndex < 1 || repoIndex > cached.length) {
+              await sessionReply(rootId, t('cmd.repo.index_out_of_range', { max: cached.length }, loc));
+              break;
+            }
+            repoPath = cached[repoIndex - 1]!.path;
+          } else {
+            const resolved = resolveRepoSelection(targetArg!, getProjectScanDirs(ds));
+            if (!resolved) {
+              await sessionReply(rootId, t('cmd.repo.path_not_found', { arg: targetArg! }, loc));
+              break;
+            }
+            repoPath = resolved.path;
+          }
+          if (ds.worktreeCreating) {
+            await sessionReply(rootId, t('cmd.repo.worktree_in_progress', undefined, loc));
+            break;
+          }
+          ds.worktreeCreating = true;
+          // Session generation snapshot — another selection can land while the
+          // (awaited) git fetch runs; committing afterwards would kill the
+          // session it just spawned. Mirror of the card-side guard.
+          const startSessionId = ds.session.sessionId;
+          const wasPending = !!ds.pendingRepo;
+          // Identity against the active map catches `/close` (which deletes
+          // the entry without touching sessionId/pendingRepo) alongside the
+          // generation snapshots.
+          const wtSessionChanged = () =>
+            activeSessions.get(sessionKey(rootId, larkAppId!)) !== ds ||
+            ds!.session.sessionId !== startSessionId || !!ds!.pendingRepo !== wasPending;
+          // Hold the in-flight lock through commit (matching the card path) —
+          // releasing it right after `git` would let a second `/repo wt` start
+          // while this one is still replying/committing.
+          try {
+            await sessionReply(rootId, t('cmd.repo.worktree_creating', { repo: repoPath }, loc));
+            let creation;
+            try {
+              creation = await createRepoWorktree(repoPath, { branch: branchArg });
+            } catch (e) {
+              await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, loc));
+              break;
+            }
+            if (wtSessionChanged()) {
+              logger.info(`[${logTag}] Worktree ${creation.path} created but session changed mid-flight — not switching`);
+              await sessionReply(rootId, t('cmd.repo.worktree_created_not_switched', { path: creation.path, branch: creation.branch }, loc));
+              break;
+            }
+            await sessionReply(rootId, t('cmd.repo.worktree_created', {
+              path: creation.path, branch: creation.branch, base: creation.baseRef,
+            }, loc));
+            // The reply above awaited a Lark round-trip — a plain selection
+            // (not gated by worktreeCreating) can land in that window. Re-check
+            // right before committing. Mirror of the card-side double guard.
+            if (wtSessionChanged()) {
+              logger.info(`[${logTag}] Worktree ${creation.path} created but session changed during reply — not switching`);
+              await sessionReply(rootId, t('cmd.repo.worktree_created_not_switched', { path: creation.path, branch: creation.branch }, loc));
+              break;
+            }
+            try {
+              await commitRepoSelection(creation.path, `${basename(creation.path)} (${creation.branch})`, `/repo wt`);
+            } catch (e) {
+              // The worktree DOES exist — only the switch failed. Don't report
+              // it as a creation failure, or a retry trips over "already exists".
+              logger.warn(`[${logTag}] Worktree ${creation.path} created but switching failed: ${e instanceof Error ? e.message : e}`);
+              await sessionReply(rootId, t('cmd.repo.worktree_switch_failed', { path: creation.path, error: e instanceof Error ? e.message : String(e) }, loc));
+            }
+          } finally {
+            ds.worktreeCreating = false;
+          }
+          break;
+        }
+
+        // Plain selections are blocked while a worktree creation/commit is in
+        // flight: the worktree commit awaits (Lark replies, prompt prep) after
+        // its generation checks, and a plain selection interleaving there
+        // would double-fork. One lock gates both kinds until the commit
+        // settles. (Bare `/repo` without pending only posts the picker card —
+        // harmless, so it stays open.)
+        if (ds?.worktreeCreating && (repoArg || ds.pendingRepo)) {
+          await sessionReply(rootId, t('cmd.repo.worktree_in_progress', undefined, loc));
+          break;
+        }
 
         // Numeric arg → pick by 1-based index from the last scan.
         if (repoArg && ds && /^\d+$/.test(repoArg)) {
@@ -2119,6 +2230,7 @@ export async function handleCommand(
           t('help.repo_list', undefined, loc),
           t('help.repo_n', undefined, loc),
           t('help.repo_path', undefined, loc),
+          t('help.repo_wt', undefined, loc),
           t('help.status', undefined, loc),
           t('help.card', undefined, loc),
           t('help.term', undefined, loc),

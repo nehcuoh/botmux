@@ -941,6 +941,16 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
     };
   });
 
+  // Second dropdown: open a repo as a NEW worktree (branched off its remote
+  // default branch). Only main checkouts make sense as sources — existing
+  // worktrees of the same repo would just duplicate the list.
+  const worktreeOptions = projects
+    .filter(p => p.type === 'repo')
+    .map(p => ({
+      text: { tag: 'plain_text' as const, content: `${p.name} (${p.branch})` },
+      value: p.path,
+    }));
+
   const card = {
     config: { wide_screen_mode: true },
     header: {
@@ -975,6 +985,17 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
           },
         ],
       },
+      ...(worktreeOptions.length > 0 ? [{
+        tag: 'action',
+        actions: [
+          {
+            tag: 'select_static',
+            placeholder: { tag: 'plain_text', content: t('card.repo.placeholder_worktree', undefined, locale) },
+            options: worktreeOptions,
+            value: { key: 'repo_worktree', root_id: rootMessageId ?? '' },
+          },
+        ],
+      }] : []),
       {
         tag: 'note',
         elements: [

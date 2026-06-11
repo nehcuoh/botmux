@@ -125,6 +125,10 @@ vi.mock('../src/services/project-scanner.js', () => ({
   describeProjectDir: vi.fn(() => null),
 }));
 
+vi.mock('../src/services/git-worktree.js', () => ({
+  createRepoWorktree: vi.fn(),
+}));
+
 vi.mock('../src/im/lark/card-builder.js', () => ({
   buildRepoSelectCard: vi.fn(() => '{"card":"json"}'),
   buildAdoptSelectCard: vi.fn(() => '{"card":"adopt-select"}'),
@@ -341,7 +345,7 @@ import type { LarkMessage, Session } from '../src/types.js';
 import { killWorker, forkWorker, getCurrentCliVersion, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from '../src/core/worker-pool.js';
 import { getOwnerOpenId } from '../src/bot-registry.js';
 import { canOperate } from '../src/im/lark/event-dispatcher.js';
-import { getSessionWorkingDir, buildNewTopicPrompt } from '../src/core/session-manager.js';
+import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots } from '../src/core/session-manager.js';
 import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
@@ -353,6 +357,7 @@ import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
+import { createRepoWorktree } from '../src/services/git-worktree.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
 import { discoverSlashCommandsForAdapter } from '../src/core/command-discovery.js';
@@ -1105,6 +1110,142 @@ describe('handleCommand', () => {
       expect(replyContent).toContain('找不到目录或项目');
       expect(forkWorker).not.toHaveBeenCalled();
       expect(sessionStore.createSession).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── /repo wt — worktree creation entry ────────────────────────────────────
+
+  describe('/repo wt', () => {
+    const SCAN = [{ name: 'project-a', path: '/home/testuser/project-a', branch: 'main' }];
+    const CREATION = { path: '/home/testuser/project-a-wt-1', branch: 'wt/1', baseRef: 'origin/main' };
+
+    it('creates a worktree off the picked repo and commits the selection', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue(CREATION);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+
+      expect(createRepoWorktree).toHaveBeenCalledWith('/home/testuser/project-a', { branch: undefined });
+      expect(ds.workingDir).toBe('/home/testuser/project-a-wt-1');
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
+      expect(ds.worktreeCreating).toBe(false);
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('worktree 已创建');
+    });
+
+    it('holds the in-flight lock through the created-notice reply (post-git window)', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue(CREATION);
+      // Park the FIRST run inside its created-notice reply, then fire a second
+      // /repo wt — it must bounce off the lock instead of starting another git.
+      let releaseReply: (() => void) | undefined;
+      vi.mocked(deps.sessionReply).mockImplementation(async (_root, text) => {
+        if (typeof text === 'string' && text.includes('worktree 已创建：') && !releaseReply) {
+          return new Promise<string>(res => { releaseReply = () => res('reply-msg-id'); });
+        }
+        return 'reply-msg-id';
+      });
+
+      const first = handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+      await vi.waitFor(() => expect(releaseReply).toBeTruthy());
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+
+      expect(createRepoWorktree).toHaveBeenCalledTimes(1);
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+
+      releaseReply!();
+      await first;
+      expect(ds.worktreeCreating).toBe(false);
+      expect(forkWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-checks the session generation after the created notice (during-reply window)', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue(CREATION);
+      // Another selection swaps the session while the created notice is in flight.
+      vi.mocked(deps.sessionReply).mockImplementation(async (_root, text) => {
+        if (typeof text === 'string' && text.includes('worktree 已创建：') && ds.session.sessionId !== 'hijacked') {
+          ds.session = { ...ds.session, sessionId: 'hijacked' };
+        }
+        return 'reply-msg-id';
+      });
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(ds.workingDir).toBeUndefined();
+      expect(ds.worktreeCreating).toBe(false);
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('未自动切换');
+    });
+
+    it('blocks a plain numeric selection while a worktree is in flight', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false, worktreeCreating: true });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(ds.workingDir).toBeUndefined();
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+    });
+
+    it('blocks the bare-/repo pending launch while a worktree is in flight', async () => {
+      const ds = makeDaemonSession({ pendingRepo: true, worktreeCreating: true });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(ds.pendingRepo).toBe(true); // not consumed
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+    });
+
+    it('aborts the pending fork when the session is /close\'d during prompt prep (last-line defence)', async () => {
+      const ds = makeDaemonSession({ pendingRepo: true, pendingPrompt: 'hello world' });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue(CREATION);
+      // /close lands inside forkPendingCli's prompt prep — deletes the
+      // active-map entry but mutates neither sessionId nor pendingRepo; only
+      // the pre-fork identity check can stop the fork.
+      vi.mocked(getAvailableBots).mockImplementationOnce(async () => {
+        deps.activeSessions.delete(sessionKey(ROOT_ID, LARK_APP_ID));
+        return [];
+      });
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(ds.worktreeCreating).toBe(false);
+    });
+
+    it('reports a commit failure as a switch failure — the worktree exists by then', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue(CREATION);
+      vi.mocked(forkWorker).mockImplementationOnce(() => { throw new Error('fork boom'); });
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
+
+      expect(ds.worktreeCreating).toBe(false);
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('自动切换失败');
+      expect(replies).toContain('fork boom');
+      expect(replies).not.toContain('创建 worktree 失败');
     });
   });
 
