@@ -1,6 +1,7 @@
 // Sessions page: filter bar, status board/table, detail drawer with locate/resume/close.
 import {
   type KanbanGroupBy,
+  KANBAN_TEAM_STORAGE_KEY,
   normalizeSessionsViewMode,
   readStoredBoardOrder,
   readStoredKanbanGroupBy,
@@ -218,8 +219,10 @@ function pageHtml(): string {
         <p>${t('sessions.subtitle')}</p>
       </div>
       <div class="sessions-view-controls">
+        <select id="kanban-team" class="kanban-team-select" aria-label="${t('sessions.kanban.groupTeam')}" hidden></select>
         <div class="segmented kanban-groupby" id="kanban-groupby" role="group" aria-label="${t('sessions.kanban.groupBy')}" hidden>
           <button type="button" data-groupby="flow">${t('sessions.kanban.groupFlow')}</button>
+          <button type="button" data-groupby="team">${t('sessions.kanban.groupTeam')}</button>
           <button type="button" data-groupby="bot">${t('sessions.kanban.groupBot')}</button>
         </div>
         <div class="segmented sessions-view-toggle" role="group" aria-label="${t('sessions.viewMode')}">
@@ -290,6 +293,7 @@ export function renderSessionsPage(root: HTMLElement) {
   const termModal = root.querySelector<HTMLDialogElement>('#term-modal')!;
   const historyModal = root.querySelector<HTMLDialogElement>('#history-modal')!;
   const groupByBox = root.querySelector<HTMLElement>('#kanban-groupby')!;
+  const teamSelect = root.querySelector<HTMLSelectElement>('#kanban-team')!;
   const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
 
   const selected = new Set<string>();
@@ -314,8 +318,57 @@ export function renderSessionsPage(root: HTMLElement) {
   // 上次渲染时每列的有序行（聚簇后的视觉平铺顺序）—— drop 落点据此找相邻卡片
   // 算持久化位置。
   let lastKanbanGroups = new Map<SessionKanbanColumn, any[]>();
-  // 看板分组维度：flow=工作流五列（可拖拽），bot=团队成员列（协作视图，只读）
+  // 看板分组维度：flow=工作流五列（可拖拽）；team=选定团队的工作流看板（含
+  // 团队内所有 bot 的会话，可拖拽）；bot=机器人视角列（只读总览）
   let kanbanGroupBy: KanbanGroupBy = readStoredKanbanGroupBy(window.localStorage);
+  // 整簇拖拽：拖群组容器头部时记录 (chatId, 源列)，drop 时整组搬运
+  let kanbanDragClusterChat: string | null = null;
+  let kanbanDragClusterCol: SessionKanbanColumn | null = null;
+  // 团队清单（groupBy='team' 首次激活时懒加载：本地托管团队 + 远程 roster）
+  let kanbanTeams: Array<{ key: string; label: string; botIds: Set<string> }> = [];
+  let kanbanTeamsLoaded = false;
+  let kanbanTeamsLoading = false;
+  let kanbanTeamKey: string = (() => {
+    try { return window.localStorage.getItem(KANBAN_TEAM_STORAGE_KEY) ?? ''; } catch { return ''; }
+  })();
+
+  async function loadKanbanTeams(): Promise<void> {
+    if (kanbanTeamsLoading || kanbanTeamsLoaded) return;
+    kanbanTeamsLoading = true;
+    try {
+      const [hosted, remote] = await Promise.all([
+        fetch('/api/team/hosted').then(r => r.json()).catch(() => null),
+        fetch('/api/team/remote-roster').then(r => r.json()).catch(() => null),
+      ]);
+      const teams: typeof kanbanTeams = [];
+      for (const tm of hosted?.teams ?? []) {
+        teams.push({
+          key: `local:${tm.teamId}`,
+          label: tm.isDefault ? t('team.myHostedTeam') : String(tm.name ?? tm.teamId),
+          botIds: new Set<string>((tm.bots ?? []).map((b: any) => String(b.larkAppId))),
+        });
+      }
+      for (const m of remote?.memberships ?? []) {
+        teams.push({
+          key: `${m.hubUrl}::${m.teamId}`,
+          label: String(m.teamName ?? m.teamId ?? m.hubUrl),
+          botIds: new Set<string>((m.roster?.bots ?? []).map((b: any) => String(b.larkAppId))),
+        });
+      }
+      kanbanTeams = teams;
+    } finally {
+      kanbanTeamsLoaded = true;
+      kanbanTeamsLoading = false;
+    }
+    if (kanbanTeams.length && !kanbanTeams.some(tm => tm.key === kanbanTeamKey)) {
+      kanbanTeamKey = kanbanTeams[0].key;
+    }
+    teamSelect.innerHTML = kanbanTeams.length
+      ? kanbanTeams.map(tm => `<option value="${escapeHtml(tm.key)}"${tm.key === kanbanTeamKey ? ' selected' : ''}>${escapeHtml(tm.label)}</option>`).join('')
+      : `<option value="">${escapeHtml(t('sessions.kanban.noTeam'))}</option>`;
+    lastKanbanHtml = '';
+    rerender();
+  }
 
   function orderedBoardColumns() {
     return boardOrder
@@ -525,8 +578,8 @@ export function renderSessionsPage(root: HTMLElement) {
       flat.push(...g.rows);
       if (g.rows.length < 2) return kanbanCardHtml(g.rows[0]);
       const title = chatDisplayTitle(g.rows[0]) ?? g.chatId;
-      return `<div class="kanban-cluster">
-        <header title="${escapeHtml(title)}">
+      return `<div class="kanban-cluster" data-chat="${escapeHtml(g.chatId)}">
+        <header draggable="true" title="${escapeHtml(title)} · ${escapeHtml(t('sessions.kanban.clusterDragHint'))}">
           ${chatAvatarHtml({ chatId: g.chatId, name: title, size: 'sm' })}
           <span class="kanban-cluster-name">${escapeHtml(title)}</span>
           <span class="kanban-cluster-count">${g.rows.length}</span>
@@ -567,39 +620,56 @@ export function renderSessionsPage(root: HTMLElement) {
     }).join('');
   }
 
+  /** 工作流五列看板（flow/team 共用）：聚簇 + 拖拽落点数据。 */
+  function kanbanFlowHtml(rows: any[]): string {
+    const groups = new Map<SessionKanbanColumn, any[]>(KANBAN_COLUMNS.map(c => [c.id, []]));
+    for (const row of rows) groups.get(deriveKanbanColumn(row))!.push(row);
+    const html = KANBAN_COLUMNS.map(column => {
+      let columnRows = (groups.get(column.id) ?? [])
+        .sort((a, b) => effectiveKanbanPosition(a) - effectiveKanbanPosition(b));
+      let hiddenCount = 0;
+      if (column.id === 'done' && columnRows.length > KANBAN_DONE_CAP) {
+        hiddenCount = columnRows.length - KANBAN_DONE_CAP;
+        columnRows = columnRows.slice(0, KANBAN_DONE_CAP);
+      }
+      const { html: listHtml, flat } = clusteredListHtml(columnRows);
+      groups.set(column.id, flat);
+      return `<section class="kanban-column kanban-${column.id}" data-col="${column.id}">
+        <header>
+          <span class="kanban-col-icon">${kanbanStatusIcon(column.id)}</span>
+          <h2>${escapeHtml(t(column.labelKey))}</h2>
+          <span class="kanban-col-count">${columnRows.length + hiddenCount}</span>
+        </header>
+        <div class="kanban-col-list">
+          ${columnRows.length ? listHtml : `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`}
+          ${hiddenCount ? `<div class="kanban-col-more">${escapeHtml(t('sessions.kanban.moreHidden', { count: hiddenCount }))}</div>` : ''}
+        </div>
+      </section>`;
+    }).join('');
+    lastKanbanGroups = groups;
+    return html;
+  }
+
   function renderKanban(rows: any[]): void {
     // 拖拽/编辑期间冻结 DOM —— innerHTML 重建会拍掉拖拽源和输入框。
-    if (kanbanDragId || kanbanEditing) return;
+    if (kanbanDragId || kanbanDragClusterChat || kanbanEditing) return;
+    kanban.classList.toggle('kanban-mode-bot', kanbanGroupBy === 'bot');
     let html: string;
     if (kanbanGroupBy === 'bot') {
       html = kanbanByBotHtml(rows);
-      lastKanbanGroups = new Map(); // 团队模式无拖拽，不需要落点数据
+      lastKanbanGroups = new Map(); // 机器人视角无拖拽，不需要落点数据
+    } else if (kanbanGroupBy === 'team') {
+      if (!kanbanTeamsLoaded) {
+        html = `<div class="kanban-col-empty">${t('sessions.kanban.teamLoading')}</div>`;
+        lastKanbanGroups = new Map();
+        void loadKanbanTeams();
+      } else {
+        const team = kanbanTeams.find(tm => tm.key === kanbanTeamKey) ?? kanbanTeams[0];
+        const teamRows = team ? rows.filter(r => team.botIds.has(String(r.larkAppId))) : [];
+        html = kanbanFlowHtml(teamRows);
+      }
     } else {
-      const groups = new Map<SessionKanbanColumn, any[]>(KANBAN_COLUMNS.map(c => [c.id, []]));
-      for (const row of rows) groups.get(deriveKanbanColumn(row))!.push(row);
-      html = KANBAN_COLUMNS.map(column => {
-        let columnRows = (groups.get(column.id) ?? [])
-          .sort((a, b) => effectiveKanbanPosition(a) - effectiveKanbanPosition(b));
-        let hiddenCount = 0;
-        if (column.id === 'done' && columnRows.length > KANBAN_DONE_CAP) {
-          hiddenCount = columnRows.length - KANBAN_DONE_CAP;
-          columnRows = columnRows.slice(0, KANBAN_DONE_CAP);
-        }
-        const { html: listHtml, flat } = clusteredListHtml(columnRows);
-        groups.set(column.id, flat);
-        return `<section class="kanban-column kanban-${column.id}" data-col="${column.id}">
-          <header>
-            <span class="kanban-col-icon">${kanbanStatusIcon(column.id)}</span>
-            <h2>${escapeHtml(t(column.labelKey))}</h2>
-            <span class="kanban-col-count">${columnRows.length + hiddenCount}</span>
-          </header>
-          <div class="kanban-col-list">
-            ${columnRows.length ? listHtml : `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`}
-            ${hiddenCount ? `<div class="kanban-col-more">${escapeHtml(t('sessions.kanban.moreHidden', { count: hiddenCount }))}</div>` : ''}
-          </div>
-        </section>`;
-      }).join('');
-      lastKanbanGroups = groups;
+      html = kanbanFlowHtml(rows);
     }
     if (html === lastKanbanHtml) return;
     lastKanbanHtml = html;
@@ -773,6 +843,8 @@ export function renderSessionsPage(root: HTMLElement) {
   /** 指针 Y 落点之下的第一张卡片（不含拖拽源）—— 新卡插它前面；null = 追加列尾。 */
   function kanbanInsertBeforeCard(column: HTMLElement, clientY: number): HTMLElement | null {
     for (const card of column.querySelectorAll<HTMLElement>('.kanban-card:not(.dragging)')) {
+      // 整簇拖拽时簇内成员不能当落点参照
+      if (card.closest('.kanban-cluster.dragging')) continue;
       const rect = card.getBoundingClientRect();
       if (clientY < rect.top + rect.height / 2) return card;
     }
@@ -901,6 +973,7 @@ export function renderSessionsPage(root: HTMLElement) {
       btn.setAttribute('aria-pressed', String(active));
     });
     groupByBox.hidden = viewMode !== 'kanban';
+    teamSelect.hidden = !(viewMode === 'kanban' && kanbanGroupBy === 'team');
     groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
       const active = btn.dataset.groupby === kanbanGroupBy;
       btn.classList.toggle('active', active);
@@ -1234,13 +1307,21 @@ export function renderSessionsPage(root: HTMLElement) {
 
   groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const next: KanbanGroupBy = btn.dataset.groupby === 'bot' ? 'bot' : 'flow';
+      const raw = btn.dataset.groupby;
+      const next: KanbanGroupBy = raw === 'bot' ? 'bot' : raw === 'team' ? 'team' : 'flow';
       if (next === kanbanGroupBy) return;
       kanbanGroupBy = next;
       writeStoredKanbanGroupBy(window.localStorage, next);
       lastKanbanHtml = '';
       rerender();
     });
+  });
+
+  teamSelect.addEventListener('change', () => {
+    kanbanTeamKey = teamSelect.value;
+    try { window.localStorage.setItem(KANBAN_TEAM_STORAGE_KEY, kanbanTeamKey); } catch { /* 仅当前页生效 */ }
+    lastKanbanHtml = '';
+    rerender();
   });
 
   // ── 看板交互：单击开终端弹窗（延迟仲裁让位双击）、铅笔/双击改标题、
@@ -1294,8 +1375,25 @@ export function renderSessionsPage(root: HTMLElement) {
 
   // ── 看板卡片拖拽 ──────────────────────────────────────────────────────────
   kanban.addEventListener('dragstart', e => {
-    if (kanbanGroupBy === 'bot') return; // 团队模式只读：会话不能拖给别的 bot
-    const card = (e.target as HTMLElement).closest<HTMLElement>('.kanban-card[data-id]');
+    if (kanbanGroupBy === 'bot') return; // 机器人视角只读：会话不能拖给别的 bot
+    const target = e.target as HTMLElement;
+    // 拖群组容器头部 = 整簇搬运
+    const clusterHeader = target.closest<HTMLElement>('.kanban-cluster > header[draggable]');
+    if (clusterHeader) {
+      const cluster = clusterHeader.closest<HTMLElement>('.kanban-cluster')!;
+      const col = cluster.closest<HTMLElement>('.kanban-column')?.dataset.col as SessionKanbanColumn | undefined;
+      if (!cluster.dataset.chat || !col) return;
+      cancelKanbanOpen();
+      kanbanDragClusterChat = cluster.dataset.chat;
+      kanbanDragClusterCol = col;
+      cluster.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', `cluster:${kanbanDragClusterChat}`);
+      }
+      return;
+    }
+    const card = target.closest<HTMLElement>('.kanban-card[data-id]');
     if (!card) return;
     cancelKanbanOpen();
     kanbanDragId = card.dataset.id!;
@@ -1307,7 +1405,7 @@ export function renderSessionsPage(root: HTMLElement) {
   });
 
   kanban.addEventListener('dragover', e => {
-    if (!kanbanDragId) return;
+    if (!kanbanDragId && !kanbanDragClusterChat) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     const column = (e.target as HTMLElement).closest<HTMLElement>('.kanban-column');
@@ -1319,18 +1417,53 @@ export function renderSessionsPage(root: HTMLElement) {
   });
 
   kanban.addEventListener('drop', e => {
-    if (!kanbanDragId) return;
-    e.preventDefault();
+    const clusterChat = kanbanDragClusterChat;
+    const clusterCol = kanbanDragClusterCol;
     const dragId = kanbanDragId;
+    if (!dragId && !clusterChat) return;
+    e.preventDefault();
     kanbanDragId = null;
+    kanbanDragClusterChat = null;
+    kanbanDragClusterCol = null;
     clearKanbanDragMarks();
     const column = (e.target as HTMLElement).closest<HTMLElement>('.kanban-column');
     const targetCol = column?.dataset.col as SessionKanbanColumn | undefined;
-    const s = store.sessions.get(dragId);
-    if (!column || !targetCol || !s) return;
+    if (!column || !targetCol) return;
+    const beforeCard = kanbanInsertBeforeCard(column, e.clientY);
+
+    // ── 整簇搬运：源列里该群的全部卡片保持相对顺序插到落点 ──────────────────
+    if (clusterChat && clusterCol) {
+      const members = (lastKanbanGroups.get(clusterCol) ?? [])
+        .filter((r: any) => String(r.chatId) === clusterChat)
+        // 已关闭会话固定在「已完成」：整簇挪去别的列时留下它们
+        .filter((r: any) => !(r.status === 'closed' && targetCol !== 'done'));
+      if (!members.length) return;
+      const memberIds = new Set(members.map((r: any) => r.sessionId));
+      const colRows = (lastKanbanGroups.get(targetCol) ?? []).filter((r: any) => !memberIds.has(r.sessionId));
+      let index = beforeCard ? colRows.findIndex((r: any) => r.sessionId === beforeCard.dataset.id) : colRows.length;
+      if (index < 0) index = colRows.length;
+      const prevRow = index > 0 ? colRows[index - 1] : null;
+      const nextRow = index < colRows.length ? colRows[index] : null;
+      const base = computeDropPosition(
+        prevRow ? effectiveKanbanPosition(prevRow) : null,
+        nextRow ? effectiveKanbanPosition(nextRow) : null,
+      );
+      members.forEach((m: any, i: number) => {
+        const prev = { column: m.kanbanColumn, position: m.kanbanPosition };
+        m.kanbanColumn = targetCol;
+        m.kanbanPosition = base + i * 0.001;
+        void persistBoardMove(m, targetCol, m.kanbanPosition, prev);
+      });
+      lastKanbanHtml = '';
+      rerender();
+      return;
+    }
+
+    // ── 单卡搬运 ─────────────────────────────────────────────────────────────
+    const s = store.sessions.get(dragId!);
+    if (!s) return;
     // 已关闭会话固定在「已完成」列，只允许列内重排。
     if (s.status === 'closed' && targetCol !== 'done') return;
-    const beforeCard = kanbanInsertBeforeCard(column, e.clientY);
     const colRows = (lastKanbanGroups.get(targetCol) ?? []).filter((r: any) => r.sessionId !== dragId);
     let index = beforeCard ? colRows.findIndex((r: any) => r.sessionId === beforeCard.dataset.id) : colRows.length;
     if (index < 0) index = colRows.length;
@@ -1350,6 +1483,8 @@ export function renderSessionsPage(root: HTMLElement) {
 
   kanban.addEventListener('dragend', () => {
     kanbanDragId = null;
+    kanbanDragClusterChat = null;
+    kanbanDragClusterCol = null;
     clearKanbanDragMarks();
     lastKanbanHtml = '';
     rerender();

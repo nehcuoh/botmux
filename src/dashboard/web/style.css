@@ -1272,13 +1272,36 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
-/* 视图控件排布：分组维度切换 + 视图切换并排（窄屏自动换行） */
+/* 视图控件排布：团队筛选 + 分组维度切换 + 视图切换并排（窄屏自动换行） */
 .sessions-view-controls {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* .segmented 自带 display:inline-flex 会盖掉 [hidden] 的 UA 样式——显式补回 */
+.sessions-view-controls [hidden] {
+  display: none !important;
+}
+
+.kanban-team-select {
+  max-width: 200px;
+}
+
+/* 机器人视角：bot 多时列不再无限压缩——固定列宽 + 容器横向滚动 */
+.sessions-kanban.kanban-mode-bot .kanban-column {
+  flex: 0 0 264px;
+}
+
+/* 整簇拖拽 */
+.kanban-cluster > header {
+  cursor: grab;
+}
+
+.kanban-cluster.dragging {
+  opacity: 0.45;
 }
 
 /* 同群聚簇容器：虚线框 + 群名头，一眼看出卡片同属一个群 */

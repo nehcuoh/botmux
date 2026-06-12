@@ -67,13 +67,14 @@ export function writeStoredSessionsViewMode(storage: Storage | undefined, mode: 
   }
 }
 
-// ── 看板分组维度：工作流列 vs 团队成员（bot）列 ───────────────────────────────
-export type KanbanGroupBy = 'flow' | 'bot';
+// ── 看板分组维度：工作流列 / 团队（筛选某团队的工作流）/ 机器人列 ─────────────
+export type KanbanGroupBy = 'flow' | 'team' | 'bot';
 
 export const KANBAN_GROUPBY_STORAGE_KEY = 'botmux.dashboard.sessions.kanbanGroupBy';
+export const KANBAN_TEAM_STORAGE_KEY = 'botmux.dashboard.sessions.kanbanTeam';
 
 export function normalizeKanbanGroupBy(value: unknown): KanbanGroupBy | null {
-  return value === 'flow' || value === 'bot' ? value : null;
+  return value === 'flow' || value === 'team' || value === 'bot' ? value : null;
 }
 
 export function readStoredKanbanGroupBy(storage: Storage | undefined): KanbanGroupBy {
