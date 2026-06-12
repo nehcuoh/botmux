@@ -20,7 +20,7 @@ import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
 import * as scheduleStore from './services/schedule-store.js';
 import * as messageQueue from './services/message-queue.js';
-import { emitHookEvent, HOOK_EVENTS, type HookEvent } from './services/hook-runner.js';
+import { emitHookEvent, emitHookEventLocal, HOOK_EVENTS, type HookEvent } from './services/hook-runner.js';
 import { setSessionLifecycleShutdown } from './services/session-lifecycle-hooks.js';
 import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
 import { expandMergeForward } from './im/lark/merge-forward.js';
@@ -1864,8 +1864,10 @@ ipcRoute('POST', '/api/session-ready', async (req, res) => {
 // CLI side（botmux send 等）调用 emitHookEvent 时，把事件转发到 daemon 这条
 // 接口；daemon 在自己的长寿命事件循环里负责 spawn hook、跑 timeout、超时杀
 // 整个进程组。短命 CLI 进程的 timer.unref 会让超时承诺失效、跑飞的 hook 留
-// 孤儿，让 daemon 接管根治这一缺口。daemon 进程自身不带 BOTMUX_SESSION_ID
-// 环境变量，所以这里调 emitHookEvent 不会再触发转发回退（无递归）。
+// 孤儿，让 daemon 接管根治这一缺口。这里必须调 emitHookEventLocal（只跑本地、
+// 永不转发）：若调 emitHookEvent，一旦会话级环境变量泄进 daemon（如在 botmux
+// 会话内执行 `botmux restart`，pm2 会把调用方环境注入新 daemon），事件会被
+// 无限自转发回本端口，烧满一核且日志静默。
 ipcRoute('POST', '/api/hooks/emit', async (req, res) => {
   let raw: unknown;
   try {
@@ -1883,7 +1885,7 @@ ipcRoute('POST', '/api/hooks/emit', async (req, res) => {
   if (!payload || typeof payload !== 'object') {
     return jsonRes(res, 400, { ok: false, error: 'bad_payload' });
   }
-  emitHookEvent(event as HookEvent, payload as Record<string, unknown>);
+  emitHookEventLocal(event as HookEvent, payload as Record<string, unknown>);
   return jsonRes(res, 202, { ok: true });
 });
 
