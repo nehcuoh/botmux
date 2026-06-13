@@ -11,7 +11,8 @@ Ideal for exposing an on-call bot to not-fully-trusted group members or external
 | | |
 |---|---|
 | ✅ **Write isolation** | Every write the bot makes (edit / create / delete files, run a build) lands in an isolated layer — your real files are **never modified** |
-| ✅ **Native reads** | The bot reads the **real** filesystem — real project, real CLI config / login / proxy env — so auth, deps, and toolchain all work; the CLI "just works" |
+| ✅ **Native reads** | The bot reads the **real** filesystem — real project, real CLI config / proxy env — so deps and toolchain all work; the CLI "just works" |
+| ✅ **Login persists** | The CLI's auth directory is **bound for real** — logging in or refreshing tokens inside the sandbox sticks (you won't lose your login); project edits stay isolated |
 | ✅ **Zero-copy, disk-light** | Built on overlayfs — **no project clone**; only the files actually changed use extra disk |
 | ✅ **Review before landing** | The owner reviews the diff + a patch file, then `git apply`s it back to the real repo — or discards it |
 | ❌ **Reads are NOT isolated** | By default the bot can read **every local file** (incl. `bots.json`, `~/.ssh`, any credentials). Masking sensitive paths requires explicit per-bot config (see "Privacy masking" below) |
@@ -21,7 +22,7 @@ Ideal for exposing an on-call bot to not-fully-trusted group members or external
 
 ## Enabling it
 
-> **Prerequisite**: **Linux only** (relies on bubblewrap + overlayfs, daemon runs as root). Mac / non-root environments are not yet supported.
+> **Prerequisite**: **Linux** (relies on bubblewrap + overlayfs). **Both root and non-root work** — root uses the faster kernel overlayfs, non-root automatically falls back to fuse-overlayfs. **Dependencies (bubblewrap / fuse-overlayfs) are auto-installed when you turn the sandbox on** — no need to pre-install; if the environment lacks auto-install permission, it prints a one-line manual command. Mac (sandbox-exec) is on the roadmap, not yet supported.
 
 ### Option 1: bots.json
 
@@ -76,7 +77,7 @@ Listed paths are masked with an **empty dir / empty file** inside the sandbox. *
 
 ## Caveats
 
-1. **Linux only**: needs bwrap + overlayfs + a root daemon; Mac / non-root not supported yet.
+1. **Linux only**: needs bwrap + overlayfs (non-root automatically uses fuse-overlayfs, deps auto-installed when you enable the sandbox); Mac (sandbox-exec) not yet supported.
 2. **Reads aren't isolated**: everything is readable by default — mask sensitive credentials with `sandboxHidePaths` (above).
 3. **Network isn't isolated**: the sandbox can reach the network / local proxy; egress is unrestricted.
 4. **Build artifacts join the changeset**: if the bot runs `pnpm build` / compiles inside the sandbox, the artifacts (e.g. `dist/`) also show up in the `/land` changeset. **Read the diff** before landing — don't `apply` build output over your real repo.

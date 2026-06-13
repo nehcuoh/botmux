@@ -11,7 +11,8 @@
 | | |
 |---|---|
 | ✅ **写隔离** | 机器人的所有写入（改 / 建 / 删文件、跑 build）都落到一个隔离层，真实文件**永不被修改** |
-| ✅ **原生读** | 机器人读到的是**真实**文件系统——真实项目、真实 CLI 配置 / 登录态 / 代理 env，所以鉴权、依赖、工具链全部照常，CLI「开箱即用」 |
+| ✅ **原生读** | 机器人读到的是**真实**文件系统——真实项目、真实 CLI 配置 / 代理 env，所以依赖、工具链全部照常，CLI「开箱即用」 |
+| ✅ **登录态持久** | CLI 的鉴权目录是**真实绑定**的——在沙盒里登录、刷新 token 都对真实生效、不会丢登录；项目改动依旧隔离 |
 | ✅ **零拷贝、省磁盘** | 基于 overlayfs，**不 clone 项目**；只有被改动的文件才占额外磁盘 |
 | ✅ **审阅后落盘** | owner 审 diff + patch 文件，确认再 `git apply` 回真实仓库，或丢弃 |
 | ❌ **不隔离读** | 默认机器人能读**本机所有文件**（含 `bots.json`、`~/.ssh`、各种凭证）。要挡敏感路径需 per-bot 显式配置（见下「隐私屏蔽」） |
@@ -21,7 +22,7 @@
 
 ## 开启方式
 
-> **前置要求**：仅 **Linux**（依赖 bubblewrap + overlayfs，daemon 以 root 运行）。Mac / 非 root 环境暂不支持。
+> **前置要求**：**Linux**（依赖 bubblewrap + overlayfs）。**root / 非 root 都支持**——root 用更快的内核 overlayfs，非 root 自动回退到 fuse-overlayfs。**依赖（bubblewrap / fuse-overlayfs）在开启沙盒时自动安装**，无需提前装；环境缺自动安装权限时会提示一条手动安装命令。Mac（sandbox-exec）在路线图上、暂未支持。
 
 ### 方式一：bots.json
 
@@ -76,7 +77,7 @@
 
 ## 注意事项
 
-1. **仅 Linux**：依赖 bwrap + overlayfs + root daemon；Mac / 非 root 暂不支持。
+1. **仅 Linux**：依赖 bwrap + overlayfs（非 root 自动用 fuse-overlayfs，依赖开沙盒时自动装）；Mac（sandbox-exec）暂未支持。
 2. **读不隔离**：默认全可读，挡敏感凭证要主动配 `sandboxHidePaths`（见上）。
 3. **网络不隔离**：沙盒内可访问网络 / 本机代理，不限制出口。
 4. **build 产物会进改动集**：如果机器人在沙盒里跑了 `pnpm build` / 编译，产物（如 `dist/`）也会出现在 `/land` 的改动集里。落盘前**看清 diff**，别把编译产物 `apply` 覆盖真实仓库。

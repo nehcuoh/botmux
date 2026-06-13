@@ -668,6 +668,7 @@ export const messages: Record<string, string> = {
   'card.ask.timed_out': '超时未答',
   'card.ask.invalidated': '已失效',
   'card.ask.no_approver': '无可用答复人',
+  'card.ask.answerable_talk_members': '本群可对话成员',
 
   // Voice summary instruction (injected into the model session)
   'card.voice.summary_instruction': '🔊【语音总结请求】把你上一条发给用户的回复，精简成不超过 5 句、适合朗读的口语：去掉代码、命令、文件路径、URL、英文缩写和 markdown 标记，只讲结论，第一句直接进正题。然后调用 `botmux send --voice "<精简后的口语>"` 把它作为语音发出来。只发这一条语音，不要再额外发文字说明。',

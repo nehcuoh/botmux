@@ -665,6 +665,7 @@ export const messages: Record<string, string> = {
   'card.ask.timed_out': 'Timed out, no answer',
   'card.ask.invalidated': 'No longer valid',
   'card.ask.no_approver': 'No eligible responders',
+  'card.ask.answerable_talk_members': 'anyone who can talk to me in this chat',
 
   // Voice summary instruction (injected into the model session)
   'card.voice.summary_instruction': '🔊 [Voice summary request] Condense your last reply to the user into spoken prose of at most 5 sentences suitable for reading aloud: drop code, commands, file paths, URLs, English abbreviations and markdown; state only the conclusions, and get to the point in the first sentence. Then call `botmux send --voice "<the condensed spoken text>"` to send it as voice. Send only this one voice message — no extra text.',
