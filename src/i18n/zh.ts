@@ -250,7 +250,7 @@ export const messages: Record<string, string> = {
   'cmd.login.status_hint': '查看状态：/login status',
   'cmd.subdoc.no_session': '⚠️ /subscribe-lark-doc 需要在一个活跃会话里用：先在本话题正常发起会话，再订阅文档。',
   'cmd.subdoc.usage': '用法：\n• /subscribe-lark-doc <飞书文档链接> — 订阅该文档，文档评论将喂进本会话\n• /subscribe-lark-doc list — 查看本会话已订阅的文档\n• /subscribe-lark-doc off — 退订本会话所有文档',
-  'cmd.subdoc.need_login': '🔐 订阅文档评论需要用户授权（否则收不到评论事件）。请先在本话题发送 /login 完成授权后重试。',
+  'cmd.subdoc.need_login': '🔐 订阅文档评论需要「文档权限」的用户授权（含读写评论 + 订阅事件，与通用 /login 的权限不同）。点下方链接完成授权，再重发 /subscribe-lark-doc <文档链接>。\n⚠️ 还需在开发者后台为本应用启用这些权限、并订阅「云文档评论」事件，否则收不到评论。',
   'cmd.subdoc.subscribed': '✅ 已订阅文档 {title}。\n之后该文档的评论（{mode}）会作为消息喂进本会话，我的回复会发表为文档评论。\n退订：/subscribe-lark-doc off',
   'cmd.subdoc.subscribed_moved': '✅ 已订阅文档 {title}（{mode}）。\n⚠️ 该文档原先绑在另一条会话上，现已改绑到本会话。',
   'cmd.subdoc.unsubscribed': '✅ 已退订本会话的 {count} 个文档。',

@@ -28,7 +28,7 @@ import { validateWorkingDir } from './working-dir.js';
 import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
-import { generateAuthUrl, getTokenStatus, resolveUserToken } from '../utils/user-token.js';
+import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../utils/user-token.js';
 import { resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { UserTokenMissingError } from '../im/lark/client.js';
 import {
@@ -1487,10 +1487,24 @@ export async function handleCommand(
 
         if (!arg) { await sessionReply(rootId, t('cmd.subdoc.usage', undefined, loc)); break; }
 
-        // 评论事件官方推荐用户身份订阅，tenant 订阅大概率收不到推送 → 强制要求先 /login。
+        // 评论事件官方推荐用户身份订阅，tenant 订阅大概率收不到推送 → 需要带文档 scope
+        // 的 User Token。文档 scope 不在通用 /login 里（避免污染所有 bot 的登录），
+        // 这里按需生成带 DOC_COMMENT_OAUTH_SCOPES 的专用授权链接。
         const subCfg = getBot(larkAppId).config;
+        const replyDocLogin = async () => {
+          const { authUrl } = generateAuthUrl(subCfg.larkAppId, subCfg.larkAppSecret, normalizeBrand(subCfg.brand), DOC_COMMENT_OAUTH_SCOPES);
+          await sessionReply(rootId, [
+            t('cmd.subdoc.need_login', undefined, loc),
+            '',
+            t('cmd.login.step1', undefined, loc),
+            authUrl,
+            '',
+            t('cmd.login.step2', undefined, loc),
+            t('cmd.login.step3', undefined, loc),
+          ].join('\n'));
+        };
         const userTok = await resolveUserToken(subCfg.larkAppId, subCfg.larkAppSecret, normalizeBrand(subCfg.brand));
-        if (!userTok) { await sessionReply(rootId, t('cmd.subdoc.need_login', undefined, loc)); break; }
+        if (!userTok) { await replyDocLogin(); break; }
 
         try {
           const file = await resolveDocFile(larkAppId, arg);
@@ -1515,8 +1529,9 @@ export async function handleCommand(
           ));
           logger.info(`[${logTag}] /subscribe-lark-doc → ${file.fileType}:${file.fileToken.slice(0, 12)} mode=${mode}${rebound ? ' (rebound)' : ''}`);
         } catch (err) {
+          // token 缺失 / 失效 / 缺文档 scope（403）→ 给带文档 scope 的重新授权链接。
           if (err instanceof UserTokenMissingError) {
-            await sessionReply(rootId, t('cmd.subdoc.need_login', undefined, loc));
+            await replyDocLogin();
           } else {
             await sessionReply(rootId, t('cmd.subdoc.failed', { err: err instanceof Error ? err.message : String(err) }, loc));
           }

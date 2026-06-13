@@ -247,7 +247,7 @@ export const messages: Record<string, string> = {
   'cmd.login.status_hint': 'Check status: /login status',
   'cmd.subdoc.no_session': '⚠️ /subscribe-lark-doc needs a live session: start a session in this topic first, then subscribe to a doc.',
   'cmd.subdoc.usage': 'Usage:\n• /subscribe-lark-doc <Feishu doc link> — subscribe; the doc\'s comments feed into this session\n• /subscribe-lark-doc list — list docs subscribed by this session\n• /subscribe-lark-doc off — unsubscribe all docs of this session',
-  'cmd.subdoc.need_login': '🔐 Subscribing to doc comments needs user authorization (otherwise comment events won\'t arrive). Please send /login in this topic first, then retry.',
+  'cmd.subdoc.need_login': '🔐 Subscribing to doc comments needs user authorization with DOC permissions (read/write comments + event subscription — different from the generic /login). Open the link below to authorize, then resend /subscribe-lark-doc <doc link>.\n⚠️ You must also enable these permissions for the app in the developer console and subscribe to the "doc comment" event, otherwise comments won\'t arrive.',
   'cmd.subdoc.subscribed': '✅ Subscribed to doc {title}.\nIts comments ({mode}) will feed into this session as messages, and my replies will be posted as doc comments.\nUnsubscribe: /subscribe-lark-doc off',
   'cmd.subdoc.subscribed_moved': '✅ Subscribed to doc {title} ({mode}).\n⚠️ This doc was bound to another session before; it is now rebound to this session.',
   'cmd.subdoc.unsubscribed': '✅ Unsubscribed {count} doc(s) from this session.',
