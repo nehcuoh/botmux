@@ -34,6 +34,22 @@ describe('global dashboard config', () => {
     expect(readGlobalConfig().dashboard).toEqual({ openTerminalInFeishu: true });
   });
 
+  it('reads repoPickerMode as a top-level global enum', () => {
+    writeFileSync(globalConfigPath(), JSON.stringify({
+      repoPickerMode: 'repos',
+      dashboard: {
+        openTerminalInFeishu: true,
+      },
+    }));
+
+    expect(readGlobalConfig().repoPickerMode).toBe('repos');
+  });
+
+  it('drops invalid repoPickerMode values', () => {
+    writeFileSync(globalConfigPath(), JSON.stringify({ repoPickerMode: 'grouped' }));
+    expect(readGlobalConfig().repoPickerMode).toBeUndefined();
+  });
+
   it('readGlobalConfig sees fresh values immediately after a merge (cache invalidation)', () => {
     writeFileSync(globalConfigPath(), JSON.stringify({ dashboard: { publicReadOnly: true } }));
     expect(readGlobalConfig().dashboard?.publicReadOnly).toBe(true); // primes the TTL cache

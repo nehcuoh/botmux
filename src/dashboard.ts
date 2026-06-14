@@ -29,7 +29,7 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_SELECT_OPTIONS, resolveCliSelection } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
+import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode } from './global-config.js';
 import { isLocale } from './i18n/types.js';
 import { isLocalDevInstall } from './utils/install-info.js';
 import { listTeamReports, readTeamBoard, setTeamBoardEntry } from './services/team-board-store.js';
@@ -90,6 +90,7 @@ const attaching = new Set<string>();   // dedup concurrent attaches per appId
 interface ResolvedDashboardSettings {
   publicReadOnly: boolean;
   openTerminalInFeishu: boolean;
+  repoPickerMode: RepoPickerMode;
   /** Auto-update / auto-restart schedule (off by default). */
   maintenance: MaintenanceConfig;
   /** True when running from a source checkout — the Settings UI greys out the
@@ -98,11 +99,13 @@ interface ResolvedDashboardSettings {
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
-  const dashboard = readGlobalConfig().dashboard ?? {};
+  const global = readGlobalConfig();
+  const dashboard = global.dashboard ?? {};
   return {
     publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
     openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
-    maintenance: readGlobalConfig().maintenance ?? {},
+    repoPickerMode: global.repoPickerMode ?? 'all',
+    maintenance: global.maintenance ?? {},
     localDevInstall: isLocalDevInstall(),
   };
 }
@@ -582,6 +585,12 @@ const server = createServer(async (req, res) => {
       }
       let touched = false;
       if (Object.keys(patch).length > 0) { mergeDashboardConfig(patch); touched = true; }
+      if ('repoPickerMode' in body) {
+        const v = body.repoPickerMode;
+        if (v !== 'all' && v !== 'repos') return jsonRes(res, 400, { ok: false, error: 'invalid_repoPickerMode' });
+        mergeGlobalConfig({ repoPickerMode: v });
+        touched = true;
+      }
       if ('maintenance' in body) {
         const r = parseMaintenancePatch(body.maintenance);
         if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.error });

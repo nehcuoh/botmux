@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config, getDashboardExternalHost } from './config.js';
+import { readGlobalConfig } from './global-config.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
@@ -2122,7 +2123,7 @@ async function startInitialPassthroughSession(args: {
 
   if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
   const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
-  const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs) : [];
+  const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs, 3, repoPickerScanOptions()) : [];
   if (projects.length > 0) {
     lastRepoScan.set(chatId, projects);
     const cardJson = buildRepoSelectCard(projects, getSessionWorkingDir(ds), anchor, localeForBot(larkAppId));
@@ -2136,6 +2137,10 @@ async function startInitialPassthroughSession(args: {
   rememberLastCliInput(ds, commandContent, commandContent);
   forkWorker(ds, '', false);
   logger.info(`[${tag(ds)}] No projects to select, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
+}
+
+function repoPickerScanOptions(): { includeWorktrees: boolean } {
+  return { includeWorktrees: readGlobalConfig().repoPickerMode !== 'repos' };
 }
 
 async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
@@ -2451,7 +2456,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
   let projects: import('./services/project-scanner.js').ProjectInfo[] = [];
   if (scanDirs.length > 0) {
-    projects = scanMultipleProjects(scanDirs);
+    projects = scanMultipleProjects(scanDirs, 3, repoPickerScanOptions());
   }
   if (projects.length > 0) {
     lastRepoScan.set(chatId, projects);
@@ -2653,7 +2658,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
     // No default dir → degrade to repo-selection card (D6 / FR-4).
     if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
     const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
-    const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs) : [];
+    const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs, 3, repoPickerScanOptions()) : [];
     if (projects.length > 0) {
       lastRepoScan.set(chatId, projects);
       const cardJson = buildRepoSelectCard(projects, getSessionWorkingDir(ds), anchor, localeForBot(larkAppId));
@@ -3197,7 +3202,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const scanDirs2 = getProjectScanDirs(newDs).filter(d => existsSync(d));
     let projects: import('./services/project-scanner.js').ProjectInfo[] = [];
     if (scanDirs2.length > 0) {
-      projects = scanMultipleProjects(scanDirs2);
+      projects = scanMultipleProjects(scanDirs2, 3, repoPickerScanOptions());
     }
     if (projects.length > 0) {
       lastRepoScan.set(autoCreateChatId, projects);

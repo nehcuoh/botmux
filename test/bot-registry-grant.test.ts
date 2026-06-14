@@ -131,6 +131,11 @@ describe('bot-registry grant additions', () => {
     expect(parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'gm3', larkAppSecret: 's' }]))[0].regularGroupMentionMode).toBeUndefined();
   });
 
+  it('does not parse repoPickerMode from bots.json because it is global config', () => {
+    const cfg = parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'rpm1', larkAppSecret: 's', repoPickerMode: 'repos' }]))[0] as any;
+    expect(cfg.repoPickerMode).toBeUndefined();
+  });
+
   it('parses p2pMode only as literal chat (else undefined = thread default)', () => {
     const cfgs = parseBotConfigsFromText(JSON.stringify([
       { larkAppId: 'p1', larkAppSecret: 's', p2pMode: 'chat' },

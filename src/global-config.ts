@@ -23,8 +23,14 @@ export interface WorkerConfig {
   idleSuspendMs?: number;
 }
 
+export type RepoPickerMode = 'all' | 'repos';
+
 export interface GlobalConfig {
   lang?: Locale;
+  /** Machine-wide repo picker display mode. Missing / 'all' preserves legacy
+   *  behavior (repos + linked worktrees). 'repos' lists only main worktrees in
+   *  selection cards; explicit /repo /abs/path/to/worktree still works. */
+  repoPickerMode?: RepoPickerMode;
   /** Machine-wide dashboard settings. These are intentionally global rather
    *  than per-bot: they govern the dashboard security boundary and the default
    *  terminal-opening behavior of cards emitted by all daemons on this host. */
@@ -161,6 +167,10 @@ function readMaintenance(raw: unknown): MaintenanceConfig | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function readRepoPickerMode(raw: unknown): RepoPickerMode | undefined {
+  return raw === 'all' || raw === 'repos' ? raw : undefined;
+}
+
 function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const d = raw as Record<string, unknown>;
@@ -230,6 +240,8 @@ export function readGlobalConfig(): GlobalConfig {
   const raw = readRawConfig();
   const out: GlobalConfig = {};
   if (isLocale(raw.lang)) out.lang = raw.lang;
+  const repoPickerMode = readRepoPickerMode(raw.repoPickerMode);
+  if (repoPickerMode) out.repoPickerMode = repoPickerMode;
   const dashboard = readDashboard(raw.dashboard);
   if (dashboard) out.dashboard = dashboard;
   const voice = readVoice(raw.voice);

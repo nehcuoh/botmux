@@ -44,6 +44,10 @@ vi.mock('../src/config.js', () => ({
   },
 }));
 
+vi.mock('../src/global-config.js', () => ({
+  readGlobalConfig: vi.fn(() => ({})),
+}));
+
 // Mock role/profile stores so /role routing tests assert on calls (no real FS).
 vi.mock('../src/core/role-resolver.js', () => ({
   writeRoleFile: vi.fn(),
@@ -358,6 +362,7 @@ import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
+import { readGlobalConfig } from '../src/global-config.js';
 import { createRepoWorktree } from '../src/services/git-worktree.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
@@ -468,7 +473,7 @@ function mockCodexAppBot(): void {
 
 describe('DAEMON_COMMANDS set', () => {
   it('should contain all expected commands', () => {
-    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/botconfig', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/list-slash-command', '/slash', '/land'];
+    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/botconfig', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/term', '/list-slash-command', '/slash', '/land'];
     for (const cmd of expected) {
       expect(DAEMON_COMMANDS.has(cmd), `Expected DAEMON_COMMANDS to contain ${cmd}`).toBe(true);
     }
@@ -1118,6 +1123,25 @@ describe('handleCommand', () => {
         'interactive',
         LARK_APP_ID,
         'msg_001',
+      );
+    });
+
+    it('should omit worktrees from the project list when global repoPickerMode is repos', async () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readGlobalConfig).mockReturnValue({ repoPickerMode: 'repos' } as any);
+      vi.mocked(scanMultipleProjects).mockReturnValue([
+        { name: 'proj', path: '/home/testuser/proj', branch: 'main' },
+      ]);
+
+      const ds = makeDaemonSession({ worker: null });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(scanMultipleProjects).toHaveBeenCalledWith(
+        ['/home/testuser'],
+        3,
+        { includeWorktrees: false },
       );
     });
 

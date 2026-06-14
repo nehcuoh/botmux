@@ -78,6 +78,7 @@ describe('bot-config store', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(keys).toContain('allowedUsers');
     expect(keys).toContain('model');
+    expect(keys).not.toContain('repoPickerMode');
   });
 
   it('parseBooleanValue accepts on/off variants and rejects junk', async () => {
