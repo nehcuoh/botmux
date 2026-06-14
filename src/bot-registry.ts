@@ -11,6 +11,15 @@ import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
 
 export type ChatReplyMode = 'chat' | 'new-topic' | 'shared';
 
+function normalizeChatReplyModeConfig(raw: unknown): ChatReplyMode | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v === 'chat') return 'chat';
+  if (v === 'new-topic' || v === 'newtopic' || v === 'thread') return 'new-topic';
+  if (v === 'topic' || v === 'shared' || v === 'share' || v === 'alias' || v === 'topic-alias' || v === 'topic_alias') return 'shared';
+  return undefined;
+}
+
 export interface OncallChat {
   /** Lark chat_id (oc_xxx) the bot was pulled into. */
   chatId: string;
@@ -578,7 +587,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       const out: { [chatId: string]: ChatReplyMode } = {};
       for (const [cid, mode] of Object.entries(entry.chatReplyModes)) {
         if (typeof cid !== 'string' || !cid.trim()) continue;
-        if (mode === 'chat' || mode === 'new-topic' || mode === 'shared') out[cid] = mode;
+        const normalizedMode = normalizeChatReplyModeConfig(mode);
+        if (normalizedMode) out[cid] = normalizedMode;
       }
       if (Object.keys(out).length > 0) chatReplyModes = out;
     }
@@ -724,9 +734,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // Per-bot regular-group default mode. Only 'new-topic' | 'shared' are
       // meaningful; 'chat' (the flat default) and anything else normalize to
       // undefined so bots.json stays clean.
-      regularGroupReplyMode: entry.regularGroupReplyMode === 'new-topic' || entry.regularGroupReplyMode === 'shared'
-        ? entry.regularGroupReplyMode
-        : undefined,
+      regularGroupReplyMode: (() => {
+        const mode = normalizeChatReplyModeConfig(entry.regularGroupReplyMode);
+        return mode === 'new-topic' || mode === 'shared' ? mode : undefined;
+      })(),
       // 3-tier @ policy. Only 'topic' | 'never' are meaningful; 'always' (the
       // default) and anything else normalize to undefined so bots.json stays clean.
       regularGroupMentionMode: entry.regularGroupMentionMode === 'topic' || entry.regularGroupMentionMode === 'never'

@@ -1046,6 +1046,46 @@ async function maybeApplySharedTopicSeed(input: {
   return messageId;
 }
 
+async function maybeFoldMentionedRegularGroupThreadToChat(input: {
+  larkAppId: string;
+  chatId: string;
+  chatType: 'group' | 'p2p';
+  message: any;
+  routing: { scope: 'thread' | 'chat'; anchor: string };
+  forceTopicApplied?: boolean;
+  mentionedThisBot: boolean;
+  ownsThreadSession?: boolean;
+}): Promise<string | undefined> {
+  const { larkAppId, chatId, chatType, message, routing, forceTopicApplied, mentionedThisBot, ownsThreadSession } = input;
+  if (forceTopicApplied || ownsThreadSession) return undefined;
+  if (!mentionedThisBot) return undefined;
+  if (chatType !== 'group') return undefined;
+  const rootId: string | undefined = message?.root_id;
+  const threadId: string | undefined = message?.thread_id;
+  if (!rootId || !threadId) return undefined;
+  const rawText = extractMessageTextForRouting(message);
+  if (rawText) {
+    const stripped = stripLeadingMentions(rawText.trim(), message?.mentions ?? []);
+    if (parseForceTopicInvocation(stripped)) return undefined;
+  }
+
+  // In a regular group, `chat` and `shared` both mean "use the group's one
+  // chat-scope session/context". Lark still reports replies inside an existing
+  // topic as root_id+thread_id, so decideRouting's generic real-thread rule
+  // would otherwise fork a brand-new thread-scope session every time another
+  // human/bot @mentions us inside that topic. Keep the visible reply in the
+  // same topic (replyRootId=rootId), but route the turn through the group
+  // chat-scope session. `new-topic` is the only mode that intentionally keeps
+  // per-topic independent sessions.
+  if (resolveRegularGroupMode(larkAppId, chatId) === 'new-topic') return undefined;
+  const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
+  if (freshMode !== 'group') return undefined;
+  routing.scope = 'chat';
+  routing.anchor = chatId;
+  logger.info(`[reply-mode] mentioned thread root=${rootId.substring(0, 12)} folds into chat=${chatId.substring(0, 12)}`);
+  return rootId;
+}
+
 /** Compute the scope + anchor for an inbound message:
  *   - root_id + thread_id     → thread-scope, anchor = root_id (real Lark 话题)
  *   - 话题群 + no real thread → thread-scope, anchor = message_id (thread seed)
@@ -1228,9 +1268,21 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           if (forcedTopic) {
             logger.info(`[/t] Force-topic override (bot sender): msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
           }
-          const replyRootId = await maybeApplySharedTopicSeed({
-            larkAppId, chatId, chatType, message, senderOpenId, messageId, routing: ctx, forceTopicApplied: forcedTopic,
+          const ownsThreadSession = ctx.scope === 'thread'
+            ? (handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false)
+            : false;
+          const canFoldForeignBotThread = findOncallChat(larkAppId, chatId)
+            || isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)
+            || hasChatGrant(larkAppId, chatId, senderOpenId)
+            || hasGlobalGrant(larkAppId, senderOpenId);
+          let replyRootId = await maybeFoldMentionedRegularGroupThreadToChat({
+            larkAppId, chatId, chatType, message, routing: ctx, forceTopicApplied: forcedTopic, mentionedThisBot: !!canFoldForeignBotThread, ownsThreadSession,
           });
+          if (!replyRootId) {
+            replyRootId = await maybeApplySharedTopicSeed({
+              larkAppId, chatId, chatType, message, senderOpenId, messageId, routing: ctx, forceTopicApplied: forcedTopic,
+            });
+          }
           // Regular-group foreign-bot @mention: gate to vetted botmux peers
           // (registered in our bot-openids cross-ref). Fires for legacy chat-scope
           // routing, the new-topic send-shape
@@ -1404,12 +1456,23 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
 
         let ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
 
-        const seedReplyRootId = await maybeApplySharedTopicSeed({
-          larkAppId, chatId, chatType, message, senderOpenId, messageId, routing, forceTopicApplied,
+        const ownsThreadSessionBeforeFold = routing.scope === 'thread'
+          ? (handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false)
+          : false;
+        const foldedReplyRootId = await maybeFoldMentionedRegularGroupThreadToChat({
+          larkAppId, chatId, chatType, message, routing, forceTopicApplied, mentionedThisBot: explicitlyMentionedThisBot, ownsThreadSession: ownsThreadSessionBeforeFold,
         });
-        if (seedReplyRootId) {
-          replyRootId = seedReplyRootId;
+        if (foldedReplyRootId) {
+          replyRootId = foldedReplyRootId;
           ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
+        } else {
+          const seedReplyRootId = await maybeApplySharedTopicSeed({
+            larkAppId, chatId, chatType, message, senderOpenId, messageId, routing, forceTopicApplied,
+          });
+          if (seedReplyRootId) {
+            replyRootId = seedReplyRootId;
+            ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
+          }
         }
 
         // 普通群 → 话题群 conversion detection. Lark group admins can flip
