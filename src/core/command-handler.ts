@@ -1152,8 +1152,53 @@ export async function handleCommand(
           if (ds!.pendingRepo) {
             await forkPendingCli(t('cmd.repo.selected_in_pending', { name: displayName }, loc));
           } else {
+            // Safety net: a mid-session `/repo` switch closes the running
+            // session and spawns a fresh one on the SAME anchor. Without a
+            // trace, the old context silently vanishes (relay/adopt/resume all
+            // hit `anchor_occupied` once the new session holds the anchor).
+            // So, before displacing it, post the same "session closed" card
+            // `/close` emits — it keeps the old session visible and carries the
+            // terminal `claude --resume` command. (Its in-card resume button
+            // still hits anchor_occupied while the new session occupies this
+            // anchor — expected; `/close` the new one first, or use the
+            // command.) Mirrors the `/close` case above.
+            const closedSessionId = ds!.session.sessionId;
+            const closedTitle = ds!.session.title;
+            const oldBotCfg = getBot(ds!.larkAppId).config;
+            const closedCliId = ds!.session.cliId ?? oldBotCfg.cliId;
+            const closedAnchor = sessionAnchorId(ds!);
+            const closedWorkingDir = ds!.session.workingDir;
+            const cliResumeCommand = (() => {
+              try {
+                const adapter = createCliAdapterSync(closedCliId, oldBotCfg.cliPathOverride);
+                const raw = adapter.buildResumeCommand?.({
+                  sessionId: closedSessionId,
+                  cliSessionId: ds!.session.cliSessionId,
+                }) ?? null;
+                return raw ? decorateResumeForWrapper(raw, oldBotCfg.wrapperCli) : null;
+              } catch { return null; }
+            })();
+
             killWorker(ds!);
-            sessionStore.closeSession(ds!.session.sessionId);
+            sessionStore.closeSession(closedSessionId);
+
+            const closedCard = buildSessionClosedCard(
+              closedSessionId,
+              closedAnchor,
+              closedTitle,
+              closedCliId,
+              closedWorkingDir,
+              cliResumeCommand,
+              loc,
+            );
+            await deliverEphemeralOrReply(
+              ds!,
+              message.senderId,
+              closedCard,
+              'interactive',
+              () => sessionReply(rootId, closedCard, 'interactive'),
+            );
+
             const session = sessionStore.createSession(ds!.chatId, rootId, displayName, ds!.chatType);
             ds!.session = session;
             ds!.lastUserPrompt = undefined;

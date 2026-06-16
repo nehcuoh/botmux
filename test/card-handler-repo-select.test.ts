@@ -103,7 +103,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 // ─── Imports ──────────────────────────────────────────────────────────────
 
 import { handleCardAction, type CardHandlerDeps } from '../src/im/lark/card-handler.js';
-import { forkWorker, killWorker } from '../src/core/worker-pool.js';
+import { forkWorker, killWorker, deliverEphemeralOrReply } from '../src/core/worker-pool.js';
 import { getAvailableBots } from '../src/core/session-manager.js';
 import { createSession, closeSession } from '../src/services/session-store.js';
 import { createRepoWorktree } from '../src/services/git-worktree.js';
@@ -214,6 +214,8 @@ describe('repo select card — plain switch', () => {
     expect(vi.mocked(forkWorker).mock.calls[0]![1]).toBe('mock-prompt');
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('已选择');
     expect(killWorker).not.toHaveBeenCalled();
+    // First-spawn (pendingRepo) closes nothing, so no "session closed" card.
+    expect(deliverEphemeralOrReply).not.toHaveBeenCalled();
   });
 
   it('mid-session selection closes the old session and forks a fresh one', async () => {
@@ -229,6 +231,11 @@ describe('repo select card — plain switch', () => {
     expect(forkWorker).toHaveBeenCalledTimes(1);
     expect(vi.mocked(forkWorker).mock.calls[0]![1]).toBe('');
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('已切换');
+    // The displaced session gets a "session closed" card (Option C safety net)
+    // so its context stays visible/recoverable instead of vanishing silently.
+    expect(deliverEphemeralOrReply).toHaveBeenCalledTimes(1);
+    const closedCard = vi.mocked(deliverEphemeralOrReply).mock.calls[0]![2] as string;
+    expect(closedCard).toContain('uuid-old');
   });
 });
 

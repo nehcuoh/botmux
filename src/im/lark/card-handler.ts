@@ -158,6 +158,7 @@ async function commitRepoSelection(
     rootId: string;
     cardMessageId?: string;
     larkAppId?: string;
+    operatorOpenId?: string;
     activeSessions: Map<string, DaemonSession>;
     sessionReply: (rid: string, content: string, msgType?: string, turnId?: string) => Promise<string>;
   },
@@ -168,7 +169,7 @@ async function commitRepoSelection(
   // confirmation so the user sees a single message, not two.
   opts?: { suppressConfirmReply?: boolean },
 ): Promise<void> {
-  const { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply } = ctx;
+  const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
   const locTarget = localeForBot(ds.larkAppId);
   // `/close` deletes the active-map entry without touching sessionId or
   // pendingRepo — identity against the map is the only tell that the session
@@ -241,6 +242,29 @@ async function commitRepoSelection(
     logger.info(`[${tag(ds)}] Repo selected: ${dirPath}, spawning CLI`);
   } else {
     // Mid-session repo switch — close old session, start fresh.
+    // Safety net (mirrors the `/repo` text-command path): capture the old
+    // session's identity BEFORE displacing it so we can post the same
+    // "session closed" card `/close` emits. The new session reuses this
+    // anchor, so the old context would otherwise vanish without a trace
+    // (relay/adopt/resume all hit `anchor_occupied`). The card keeps it
+    // visible and carries the terminal `claude --resume` command.
+    const closedSessionId = ds.session.sessionId;
+    const closedTitle = ds.session.title;
+    const oldBotCfg = getBot(ds.larkAppId).config;
+    const closedCliId = sessionCliId(ds);
+    const closedAnchor = sessionAnchorId(ds);
+    const closedWorkingDir = ds.session.workingDir;
+    const cliResumeCommand = (() => {
+      try {
+        const adapter = createCliAdapterSync(closedCliId, oldBotCfg.cliPathOverride);
+        const raw = adapter.buildResumeCommand?.({
+          sessionId: closedSessionId,
+          cliSessionId: ds.session.cliSessionId,
+        }) ?? null;
+        return raw ? decorateResumeForWrapper(raw, oldBotCfg.wrapperCli) : null;
+      } catch { return null; }
+    })();
+
     killWorker(ds);
     // Park the current card in `frozenCards` so the next POST under the new
     // session sweeps it via recall. closeSession() wipes the on-disk
@@ -250,6 +274,24 @@ async function commitRepoSelection(
     // stays in the thread instead of vanishing prematurely.
     parkStreamCard(ds);
     sessionStore.closeSession(ds.session.sessionId);
+
+    const closedCard = buildSessionClosedCard(
+      closedSessionId,
+      closedAnchor,
+      closedTitle,
+      closedCliId,
+      closedWorkingDir,
+      cliResumeCommand,
+      locTarget,
+    );
+    await deliverEphemeralOrReply(
+      ds,
+      operatorOpenId,
+      closedCard,
+      'interactive',
+      () => sessionReply(rootId, closedCard, 'interactive'),
+    );
+
     const session = sessionStore.createSession(ds.chatId, rootId, dirLabel, ds.chatType);
     ds.session = session;
     ds.lastUserPrompt = undefined;
@@ -1726,7 +1768,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // Shared commit context for a resolved directory — funnels the dropdown,
   // worktree and manual-entry flows through the same module-level
   // commitRepoSelection (pin dir, then fork pending CLI or close+recreate).
-  const commitCtx = { ds: targetDs, rootId, cardMessageId, larkAppId, activeSessions, sessionReply };
+  const commitCtx = { ds: targetDs, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply };
 
   if (isWorktreeOpen) {
     // Worktree creation involves a `git fetch` that can take many seconds —
