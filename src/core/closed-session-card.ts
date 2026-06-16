@@ -28,7 +28,9 @@ export function buildClosedSessionCard(ds: DaemonSession, locale: Locale): strin
         sessionId: closedSessionId,
         cliSessionId: ds.session.cliSessionId,
       }) ?? null;
-      return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
+      // ttadk 网关：resume 命令必须带 `-m <model> --skip-check`（模型取 bot.model），
+      // 否则用户复制粘贴这条命令会卡在 ttadk 的交互式选模型菜单（CoCo 不带 -m）。
+      return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli, { ttadkModel: botCfg.model }) : null;
     } catch { return null; }
   })();
   return buildSessionClosedCard(
