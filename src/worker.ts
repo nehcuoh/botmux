@@ -20,6 +20,7 @@ import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlCon
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { shouldWriteNow } from './utils/input-gate.js';
+import { mergeQueuedCliInput, type PendingCliInput } from './utils/pending-input-queue.js';
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { InflightInputTracker } from './core/inflight-input-tracker.js';
 import {
@@ -216,7 +217,7 @@ function releaseReadyGate(reason: string): void {
     settleThenFlush(Date.now());
   }
 }
-const pendingMessages: Array<{ content: string; turnId?: string }> = [];
+const pendingMessages: PendingCliInput[] = [];
 /** Inputs written to the CLI whose turn hasn't completed — re-queued across a
  *  CLI crash so a submit-time death can't silently eat user messages. */
 const inflightInputs = new InflightInputTracker();
@@ -3043,7 +3044,19 @@ async function flushPending(): Promise<void> {
 
 function sendToPty(content: string, turnId?: string): void {
   if (!backend || !cliAdapter) return;
-  pendingMessages.push({ content, turnId });
+  const next = { content, turnId };
+  const shouldMergeQueued = !isFlushing && !shouldWriteNow({
+    isPromptReady,
+    isFlushing,
+    supportsTypeAhead: cliAdapter.supportsTypeAhead === true,
+    awaitingFirstPrompt,
+  });
+  const mergedQueued = shouldMergeQueued && mergeQueuedCliInput(pendingMessages, next);
+  if (mergedQueued) {
+    log(`Merged queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
+  } else {
+    pendingMessages.push(next);
+  }
   // User-override semantics: a fresh Lark message while a TUI prompt is "active"
   // takes precedence over the AI-detected prompt. The screen analyzer can be
   // wrong (false positive on a question that has no rendered options) and a
@@ -3068,10 +3081,10 @@ function sendToPty(content: string, turnId?: string): void {
   // delivers queued messages instead. See input-gate.ts; this fixes dispatch's
   // brief reaching Codex before its first idle and never landing.
   if (shouldWriteNow({ isPromptReady, isFlushing, supportsTypeAhead: cliAdapter.supportsTypeAhead === true, awaitingFirstPrompt })) {
-    log(`Writing to PTY: "${content.substring(0, 80)}"`);
+    if (!mergedQueued) log(`Writing to PTY: "${content.substring(0, 80)}"`);
     flushPending();  // fire-and-forget async; no-op if already flushing
   } else {
-    log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
+    if (!mergedQueued) log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
   }
 }
 
