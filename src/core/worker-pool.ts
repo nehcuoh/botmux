@@ -26,6 +26,8 @@ import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
 import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
 import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.js';
+import { replyToDocComment, chunkCommentText, unsubscribeDocFile } from '../im/lark/doc-comment.js';
+import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
@@ -1089,6 +1091,19 @@ export async function closeSession(
     // crash/limited turn may never have reached an idle edge).
     recordUsageForDaemonSession(ds);
     killWorker(ds);
+    // 文档订阅清理：会话关闭即退订其绑定的所有文档（飞书侧退订 + 删注册表），
+    // 否则该文档之后的评论会变成「命中订阅但无活跃会话」而被丢弃。
+    try {
+      const anchor = sessionAnchorId(ds);
+      const subs = listDocSubscriptionsForSession(config.session.dataDir, ds.larkAppId, anchor);
+      for (const sub of subs) {
+        await unsubscribeDocFile(ds.larkAppId, { fileToken: sub.fileToken, fileType: sub.fileType });
+        removeDocSubscription(config.session.dataDir, ds.larkAppId, sub.fileToken);
+      }
+      if (subs.length) logger.info(`[doc-comment] session ${sessionId.slice(0, 8)} closed → unsubscribed ${subs.length} doc(s)`);
+    } catch (err: any) {
+      logger.warn(`[doc-comment] cleanup on close failed for ${sessionId.slice(0, 8)}: ${err?.message ?? err}`);
+    }
     activeSessionsRegistry?.delete(sessionKey(sessionAnchorId(ds), ds.larkAppId));
     killedLive = true;
     if (!ds.exitEventEmitted) {
@@ -2256,6 +2271,41 @@ function deliverFinalOutput(
       return;
     }
     try {
+      // 文档评论入口分流：本轮若来自飞书文档评论（/subscribe-lark-doc），把正文
+      // 发表为文档评论（而非飞书卡片），状态卡/占位卡仍留在飞书会话起点。
+      const docTurn = ds.docCommentTurns?.get(msg.turnId);
+      if (docTurn) {
+        const loc = localeForBot(ds.larkAppId);
+        // 嵌套回复到用户那条评论 thread（已挂在其下，无需再 ↪ 前缀）。这是兜底路径
+        // （模型没显式 botmux send），默认 @ 回原评论人，仅首块加。
+        const chunks = chunkCommentText(msg.content);
+        for (let i = 0; i < chunks.length; i++) {
+          await replyToDocComment(ds.larkAppId, { fileToken: docTurn.fileToken, fileType: docTurn.fileType }, docTurn.commentId, chunks[i], i === 0 ? docTurn.replyToOpenId : undefined);
+        }
+        // 收尾飞书侧占位卡（streaming-disabled 会话），避免停在「处理中」。
+        // streaming 卡（若开启）会在 idle 自行冻结，无需在此处理。
+        const donePendingId = lockedPendingCardId ?? claimPendingResponseCard(ds.session);
+        if (donePendingId) {
+          try {
+            await updateMessage(ds.larkAppId, donePendingId, buildMarkdownCard(
+              tr('daemon.doc_comment_replied_card', undefined, loc),
+              daemonCardFooterRecipientOpenId(ds, effectiveCliId),
+              resolveBrandLabel(ds.larkAppId),
+              loc,
+            ));
+            markPendingResponseCardPatchedIfCurrent(ds.session, donePendingId);
+            syncPendingResponseState(ds, ds.session);
+            sessionStore.updateSession(ds.session);
+          } catch (err: any) {
+            if (!(err instanceof MessageWithdrawnError)) logger.warn(`[${t}] failed to finalize 飞书 pending card for doc-comment turn: ${err?.message ?? err}`);
+          }
+        }
+        ds.docCommentTurns?.delete(msg.turnId);
+        ds.lastBridgeEmittedUuid = msg.lastUuid;
+        logger.info(`[${t}] doc-comment final_output → posted ${chunks.length} comment(s) on file=${docTurn.fileToken.slice(0, 12)} (turn ${msg.turnId.substring(0, 8)})`);
+        return;
+      }
+
       // Wrap the model's reply in the same card chrome `botmux send` uses
       // (schema 2.0 + footer with botmux link + 发送给 owner) so a turn
       // delivered via this fallback path looks identical in the Lark thread

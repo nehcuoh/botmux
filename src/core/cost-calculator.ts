@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { logger } from '../utils/logger.js';
 import { expandHome } from './working-dir.js';
 import type { CliId } from '../adapters/cli/types.js';
+import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { findAidenLatestCheckpointByBotmuxSessionId, findAidenLatestCheckpointBySessionId } from '../services/aiden-checkpoints.js';
 import { findCodexRolloutBySessionId, findCodexSessionIdByBotmuxSessionId } from '../services/codex-transcript.js';
 import { cocoEventsPathForSession } from '../services/coco-transcript.js';
@@ -134,6 +135,7 @@ function usageKindForCli(cliId: SessionTokenUsageQuery['cliId']): UsageKind {
   switch (cliId) {
     case 'claude-code':
     case 'seed':
+    case 'relay':
       return 'claude';
     case 'codex':
       return 'codex';
@@ -545,13 +547,38 @@ function readTokenUsageFromAidenCheckpoint(path: string): SessionTokenUsage | nu
   };
 }
 
+/** Resolve a Claude-family fork's (seed / relay) data root EXACTLY as the worker
+ *  does, so usage reads hit the same transcript the CLI wrote. The adapter
+ *  derives the root by realpath-resolving the binary to `<pkg>/.claude-runtime`
+ *  (see deriveSeedDataDir / deriveRelayDataDir) and the worker spawns the CLI
+ *  with `spawnEnv = { CLAUDE_CONFIG_DIR: <that root> }`, which *overrides* any
+ *  inherited env (worker.ts: process.env first, then adapter.spawnEnv). So a
+ *  botmux-spawned seed/relay ALWAYS writes to the adapter-derived root —
+ *  regardless of whether the daemon itself has CLAUDE_CONFIG_DIR set. We must
+ *  read from the same place; consulting the daemon's own env (the old
+ *  `process.env.CLAUDE_CONFIG_DIR || ~/.claude-runtime`) would diverge from
+ *  where the CLI actually wrote. `claudeDataDir` is the single source of truth.
+ *  Cached so the dashboard read path doesn't shell out (`which`) per refresh.
+ *
+ *  Uses the DEFAULT binary (no per-bot cliPathOverride); a custom path would
+ *  resolve a different root, but that narrow case was already unsupported here. */
+const claudeForkDataDirCache = new Map<string, string>();
+function claudeForkDataDir(cliId: 'seed' | 'relay'): string {
+  const cached = claudeForkDataDirCache.get(cliId);
+  if (cached) return cached;
+  const dir = createCliAdapterSync(cliId).claudeDataDir ?? join(homedir(), '.claude-runtime');
+  claudeForkDataDirCache.set(cliId, dir);
+  return dir;
+}
+
 function tokenUsagePathForSession(q: SessionTokenUsageQuery): string | null {
   const sid = q.cliSessionId || q.sessionId;
   switch (q.cliId) {
     case 'claude-code':
       return q.cwd ? getClaudeSessionJsonlPath(sid, q.cwd, join(homedir(), '.claude')) : null;
     case 'seed':
-      return q.cwd ? getClaudeSessionJsonlPath(sid, q.cwd, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude-runtime')) : null;
+    case 'relay':
+      return q.cwd ? getClaudeSessionJsonlPath(sid, q.cwd, claudeForkDataDir(q.cliId)) : null;
     case 'codex':
       return cachedPathLookup(`codex:${q.sessionId}:${q.cliSessionId ?? ''}`, null, () => {
         const codexSid = q.cliSessionId || findCodexSessionIdByBotmuxSessionId(q.sessionId) || q.sessionId;

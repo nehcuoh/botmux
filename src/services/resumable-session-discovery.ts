@@ -6,7 +6,7 @@
  * runs `<cli> --resume <id>` in the recorded cwd.
  *
  * Three storage shapes are covered (one parser each, shared across CLIs):
- *   - Claude-family JSONL  (`claude-code`, `seed`): <dataDir>/projects/<hash>/<id>.jsonl
+ *   - Claude-family JSONL  (`claude-code`, `seed`, `relay`): <dataDir>/projects/<hash>/<id>.jsonl
  *   - Codex/TRAE rollout   (`codex`, `traex`):       <sessionsRoot>/YYYY/MM/DD/rollout-*.jsonl
  *   - Antigravity history  (`antigravity`):          <home>/history.jsonl (flat submit log)
  *
@@ -166,7 +166,7 @@ async function collectRecentJsonl(
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
 }
 
-// ─── Claude-family JSONL (claude-code, seed) ─────────────────────────────────
+// ─── Claude-family JSONL (claude-code, seed, relay) ──────────────────────────
 
 /** Parse one Claude JSONL transcript. The session id is the filename; cwd +
  *  first user prompt come from the content (streamed line by line, stopping

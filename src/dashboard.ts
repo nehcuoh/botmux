@@ -1,5 +1,6 @@
 // src/dashboard.ts
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import {
   readFileSync, existsSync, chmodSync, mkdirSync, statSync, createReadStream,
 } from 'node:fs';
@@ -27,7 +28,14 @@ import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
-import { CLI_SELECT_OPTIONS, resolveCliSelection } from './setup/cli-selection.js';
+import {
+  CLI_SELECT_OPTIONS,
+  resolveCliSelection,
+  isTtadkWrapper,
+  ttadkAcceptsModel,
+  TTADK_DEFAULT_MODEL,
+  TTADK_MODEL_SUGGESTIONS,
+} from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode } from './global-config.js';
 import { isLocale } from './i18n/types.js';
@@ -68,6 +76,28 @@ let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
 let boundDashboardPort = config.dashboard.port;
 
 const SECRET = loadOrCreateSecret();
+
+function isWildcardBindHost(host: string): boolean {
+  return host === '0.0.0.0' || host === '::' || host === '';
+}
+
+function tcpPortAvailable(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createTcpServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, host, () => {
+      probe.close(() => resolve(true));
+    });
+  });
+}
+
+function dashboardPortAvailable(port: number): Promise<boolean> {
+  if (!isWildcardBindHost(config.dashboard.host)) return Promise.resolve(true);
+  // `botmux dashboard` talks to loopback even when the browser-facing server
+  // binds wildcard. On macOS another process can hold 127.0.0.1:port while a
+  // wildcard bind still succeeds, causing CLI HMAC calls to hit that process.
+  return tcpPortAvailable('127.0.0.1', port);
+}
 
 /** Sign a loopback request to a daemon's write-link route. The daemon verifies
  *  with the same .dashboard-secret, so only a caller that can read the secret —
@@ -652,7 +682,19 @@ const server = createServer(async (req, res) => {
     // 含 aiden×claude / aiden×codex 网关项——前端打开"添加机器人"表单时拉取填充下拉.
     // id 既可能是普通 cliId, 也可能是 'aiden-x-claude' 这类选择键, 由 resolveCliSelection 解析.
     if (req.method === 'GET' && url.pathname === '/api/cli-options') {
-      return jsonRes(res, 200, { options: CLI_SELECT_OPTIONS.map((o) => ({ id: o.key, label: o.label })) });
+      return jsonRes(res, 200, {
+        options: CLI_SELECT_OPTIONS.map((o) => ({
+          id: o.key,
+          label: o.label,
+          // ttadk 网关项: 前端据此把模型框默认成 glm-5.1 并挂候选下拉; CoCo 不接受 -m.
+          ...(isTtadkWrapper(o.wrapperCli)
+            ? { gateway: 'ttadk' as const, acceptsModel: ttadkAcceptsModel(o.wrapperCli) }
+            : {}),
+        })),
+        // ttadk 模型默认值 + 候选 (单一事实源在 cli-selection), 供前端模型框使用.
+        ttadkModelDefault: TTADK_DEFAULT_MODEL,
+        ttadkModelSuggestions: TTADK_MODEL_SUGGESTIONS,
+      });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/bot-onboarding/start') {
@@ -1372,6 +1414,7 @@ listenWithProbe({
   server,
   port: config.dashboard.port,
   host: config.dashboard.host,
+  portAvailable: dashboardPortAvailable,
   log: (m) => logger.warn(`[dashboard] ${m}`),
 }).then((port) => {
   boundDashboardPort = port;

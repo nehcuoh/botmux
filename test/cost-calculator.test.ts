@@ -44,6 +44,14 @@ vi.mock('../src/services/aiden-checkpoints.js', () => ({
   findAidenLatestCheckpointByBotmuxSessionId: vi.fn(() => undefined),
 }));
 
+// Seed/Relay data root resolution goes through the adapter (binary realpath →
+// <pkg>/.claude-runtime). Mock it to a deterministic package-local root so the
+// path assertion below proves we no longer read from ~/.claude-runtime.
+const FORK_DATA_DIR = '/fake/pkg/.claude-runtime';
+vi.mock('../src/adapters/cli/registry.js', () => ({
+  createCliAdapterSync: vi.fn(() => ({ claudeDataDir: FORK_DATA_DIR })),
+}));
+
 import { existsSync, readFileSync } from 'node:fs';
 import { findAidenLatestCheckpointByBotmuxSessionId, findAidenLatestCheckpointBySessionId } from '../src/services/aiden-checkpoints.js';
 import { findCodexRolloutBySessionId, findCodexSessionIdByBotmuxSessionId } from '../src/services/codex-transcript.js';
@@ -385,6 +393,37 @@ describe('getSessionTokenUsage', () => {
       sessionId: 's1',
       cwd: '/tmp',
     })).toBeNull();
+  });
+
+  it('resolves relay usage under the adapter\'s package-local .claude-runtime (not ~/.claude-runtime)', () => {
+    delete process.env.CLAUDE_CONFIG_DIR;
+    setupJsonl(assistantLine({ input: 100, output: 50, model: 'ark/relay-code' }));
+
+    const usage = getSessionTokenUsage({ cliId: 'relay', sessionId: 's1', cwd: '/tmp' });
+
+    expect(usage).toMatchObject({ inputTokens: 100, outputTokens: 50, turns: 1 });
+    // The jsonl path must sit under the adapter-derived package root, never the
+    // old ~/.claude-runtime fallback that the daemon's unset env produced.
+    const readPaths = vi.mocked(readFileSync).mock.calls.map((c) => String(c[0]));
+    expect(readPaths.some((p) => p.startsWith(`${FORK_DATA_DIR}/projects/`))).toBe(true);
+    expect(readPaths.every((p) => !p.startsWith('/home/testuser/.claude-runtime/'))).toBe(true);
+  });
+
+  it('ignores the daemon CLAUDE_CONFIG_DIR for seed/relay, matching the worker (adapter-forced dataDir)', () => {
+    // worker.ts spawns seed/relay with spawnEnv={CLAUDE_CONFIG_DIR: <adapter dataDir>},
+    // overriding any inherited env — so the transcript is ALWAYS under the package
+    // .claude-runtime. The calculator must read that same root, not the daemon's env,
+    // else usage reads diverge from where the CLI actually wrote.
+    process.env.CLAUDE_CONFIG_DIR = '/explicit/config-dir';
+    setupJsonl(assistantLine({ input: 10, output: 5 }));
+    try {
+      getSessionTokenUsage({ cliId: 'seed', sessionId: 's1', cwd: '/tmp', fresh: true });
+      const readPaths = vi.mocked(readFileSync).mock.calls.map((c) => String(c[0]));
+      expect(readPaths.some((p) => p.startsWith(`${FORK_DATA_DIR}/projects/`))).toBe(true);
+      expect(readPaths.every((p) => !p.startsWith('/explicit/config-dir/'))).toBe(true);
+    } finally {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    }
   });
 
   it('reports Codex token_count totals without double-counting cached input', () => {

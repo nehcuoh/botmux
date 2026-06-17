@@ -31,6 +31,7 @@ export type DashboardEndpoint = '/__cli/rotate' | '/__cli/current';
 export type DashboardFailReason =
   | 'no-secret'
   | 'unreachable'
+  | 'auth-failed'
   | 'http-error'
   | 'no-active-token'
   | 'wrong-service';
@@ -58,6 +59,31 @@ export function classifyDashboard404(path: DashboardEndpoint, bodyText: string):
     ok: false,
     reason: 'wrong-service',
     detail: bodyText ? `404 ${bodyText.slice(0, 200)}` : '404',
+  };
+}
+
+/**
+ * A 401 sig_mismatch from the recorded port does NOT prove that we reached the
+ * live dashboard. On macOS a wildcard dashboard bind can coexist with another
+ * process listening on 127.0.0.1:same-port, so the CLI's loopback request may
+ * hit the shadowing process or a stale dashboard. Treat it as rediscoverable.
+ */
+export function classifyDashboard401(bodyText: string): DashboardResult {
+  let body: unknown = null;
+  try { body = JSON.parse(bodyText); } catch { /* non-JSON 401 */ }
+  const err = (body && typeof body === 'object') ? (body as { error?: unknown }).error : undefined;
+  const authReason = (body && typeof body === 'object') ? (body as { reason?: unknown }).reason : undefined;
+  if (err === 'unauthorized' && authReason === 'sig_mismatch') {
+    return {
+      ok: false,
+      reason: 'auth-failed',
+      detail: bodyText ? `401 ${bodyText.slice(0, 200)}` : '401 sig_mismatch',
+    };
+  }
+  return {
+    ok: false,
+    reason: 'http-error',
+    detail: bodyText ? `401 ${bodyText.slice(0, 200)}` : '401',
   };
 }
 
@@ -92,6 +118,7 @@ export async function requestDashboardAt(opts: {
     return { ok: false, reason: 'unreachable' };
   }
   if (res.status === 404) return classifyDashboard404(path, await res.text().catch(() => ''));
+  if (res.status === 401) return classifyDashboard401(await res.text().catch(() => ''));
   if (!res.ok) {
     return { ok: false, reason: 'http-error', detail: `${res.status} ${await res.text().catch(() => '')}` };
   }
@@ -105,9 +132,14 @@ function reachedDashboard(r: DashboardResult): boolean {
   return r.ok || (!r.ok && (r.reason === 'no-active-token' || r.reason === 'http-error'));
 }
 
+function shouldRediscover(r: DashboardResult): boolean {
+  return !r.ok && (r.reason === 'wrong-service' || r.reason === 'auth-failed');
+}
+
 /**
  * Resolve the dashboard URL for `path`, trying the recorded port first and
- * self-healing the port file when it points at the wrong service.
+ * self-healing the port file when it points at the wrong service or a loopback
+ * shadow returns an HMAC mismatch.
  */
 export async function callDashboard(opts: {
   configDir: string;
@@ -139,11 +171,12 @@ export async function callDashboard(opts: {
   const first = await requestDashboardAt({ host, port: candidate, path: opts.path, secret, fetchImpl });
   if (reachedDashboard(first)) return first;
 
-  // 2. Only `wrong-service` warrants rediscovery: some server answered on the
-  //    recorded port but it's not the dashboard, so the port file is stale.
-  //    (`unreachable` during boot resolves by retrying the same port, not by
-  //    scanning — so we leave it to the caller's retry loop.)
-  if (first.ok || first.reason !== 'wrong-service') return first;
+  // 2. Rediscover only when some server answered on the recorded loopback port
+  //    but failed dashboard identity checks: explicit wrong-service 404, or a
+  //    sig_mismatch from a shadow/stale dashboard. (`unreachable` during boot
+  //    resolves by retrying the same port, not by scanning — so we leave it to
+  //    the caller's retry loop.)
+  if (!shouldRediscover(first)) return first;
 
   const base = Number(opts.envPort || opts.defaultPort);
   for (let p = base; p <= base + probeSpan; p++) {

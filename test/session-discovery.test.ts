@@ -263,6 +263,22 @@ describe('discoverAdoptableSessions', () => {
     expect(results[1]!.paneRows).toBe(50);
   });
 
+  it('should discover seed and relay processes by comm (Claude Code forks)', () => {
+    setupMocks({
+      paneLines: 'dev:0.0 1000\ndev:1.0 2000\n',
+      commMap: { 1000: 'bash', 1100: 'seed', 2000: 'zsh', 2100: 'relay' },
+      childMap: { 1000: [1100], 2000: [2100] },
+      cwdMap: { 1100: '/project/seed', 2100: '/project/relay' },
+      dimsMap: { 'dev:0.0': '80 24', 'dev:1.0': '200 50' },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.cliId).toBe('seed');
+    expect(results[1]!.cliId).toBe('relay');
+  });
+
   it('should discover cursor-agent processes as Cursor sessions', () => {
     setupMocks({
       paneLines: 'cursor:0.0 1000\n',

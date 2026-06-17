@@ -358,7 +358,7 @@ import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
-import { buildSlashListCard } from '../src/im/lark/card-builder.js';
+import { buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
@@ -497,8 +497,9 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
-    // 23 = 21 original + /land (sandbox-landing) + /term (operable-terminal slash).
-    expect(DAEMON_COMMANDS.size).toBe(23);
+    // 24 = 21 original + /land (sandbox-landing) + /term (operable-terminal slash)
+    //      + /subscribe-lark-doc (Feishu doc comment entry).
+    expect(DAEMON_COMMANDS.size).toBe(24);
   });
 
   it('contains the /list-slash-command lister and its /slash alias', () => {
@@ -739,6 +740,33 @@ describe('handleCommand', () => {
       const cardJson = replyArgs[1] as string;
       expect(cardJson).toContain('botmux resume');
       expect(cardJson).toContain('"action":"resume"');
+    });
+
+    it('keeps ttadk non-interactive flags in the closed-card resume command', async () => {
+      // A ttadk × Claude bot: the manual resume command on the closed card must
+      // carry `-m <model> --skip-check`, else copy-pasting it hits ttadk's model
+      // picker. Verifies the /close construction passes { ttadkModel: bot.model }
+      // (not just the decorateResumeForWrapper helper in isolation).
+      vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => ({
+        botName: 'Claude',
+        config: {
+          larkAppId: id,
+          larkAppSecret: 'secret-1',
+          cliId: 'claude-code' as const,
+          wrapperCli: 'ttadk claude',
+          model: 'glm-5.1',
+          workingDir: '~/projects',
+          workingDirs: ['~/projects'],
+        },
+      })) as any);
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+
+      await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), deps, LARK_APP_ID);
+
+      // 6th positional arg to buildSessionClosedCard is the cliResumeCommand.
+      const resumeArg = vi.mocked(buildSessionClosedCard).mock.calls[0]?.[5];
+      expect(resumeArg).toBe('ttadk claude -m glm-5.1 --skip-check --resume sess-001');
     });
 
     it('should reply with no-session message when session does not exist', async () => {

@@ -31,6 +31,7 @@ const zhSidebar = [
       { text: '会话接入 Adopt', link: '/adopt' },
       { text: '会话接力 Relay', link: '/relay' },
       { text: '一键建会话群', link: '/group' },
+      { text: '飞书文档评论入口', link: '/doc-comment' },
       { text: '定时任务', link: '/schedule' },
       { text: 'Oncall 模式', link: '/oncall' },
       { text: '文件沙盒', link: '/sandbox' },
@@ -102,6 +103,7 @@ const enSidebar = [
       { text: 'Adopt a Session', link: '/en/adopt' },
       { text: 'Relay a Session', link: '/en/relay' },
       { text: 'One-Click Session Groups', link: '/en/group' },
+      { text: 'Feishu Doc Comment Entry', link: '/en/doc-comment' },
       { text: 'Scheduled Tasks', link: '/en/schedule' },
       { text: 'On-Call Mode', link: '/en/oncall' },
       { text: 'File Sandbox', link: '/en/sandbox' },
@@ -168,7 +170,7 @@ export default defineConfig({
   search: { codeBlocks: true },
   markdown: { link: { checkDeadLinks: true } },
   builderConfig: {
-    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v19/" },
+    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v20/" },
   },
   themeConfig: {
     editLink: {

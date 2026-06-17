@@ -10,6 +10,9 @@ const REGISTRY: Record<string, HookAskAdapter> = {
   // so it reuses the claude hook adapter (the `botmux hook seed` command's
   // payload parses the same way).
   seed: claude,
+  // Relay is the current release name of the Seed fork — same Claude-compatible
+  // AskUserQuestion hook payload, so `botmux hook relay` reuses the claude adapter.
+  relay: claude,
   codex,
   opencode,
   // CoCo (Trae CLI): AskUserQuestion payload is Claude-compatible (parseQuestions

@@ -860,6 +860,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     autoStartOnNewTopic: cardPrefs.autoStartOnNewTopic,
     regularGroupReplyMode: cardPrefs.regularGroupReplyMode,
     regularGroupMentionMode: cardPrefs.regularGroupMentionMode,
+    docSubscribeDefaultMode: cardPrefs.docSubscribeDefaultMode,
     restrictGrantCommands: grantPrefs.restrictGrantCommands,
     messageQuotaDefaultLimit: grantPrefs.messageQuotaDefaultLimit,
     p2pMode,
@@ -873,7 +874,7 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   let body: {
     disableStreamingCard?: unknown; writableTerminalLinkInCard?: unknown; privateCard?: unknown;
     autoStartOnGroupJoin?: unknown; autoStartOnGroupJoinPrompt?: unknown; autoStartOnNewTopic?: unknown;
-    regularGroupReplyMode?: unknown; regularGroupMentionMode?: unknown;
+    regularGroupReplyMode?: unknown; regularGroupMentionMode?: unknown; docSubscribeDefaultMode?: unknown;
   };
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -882,6 +883,7 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
     disableStreamingCard?: boolean; writableTerminalLinkInCard?: boolean; privateCard?: boolean;
     autoStartOnGroupJoin?: boolean; autoStartOnGroupJoinPrompt?: string; autoStartOnNewTopic?: boolean;
     regularGroupReplyMode?: ChatReplyMode; regularGroupMentionMode?: 'always' | 'topic' | 'never';
+    docSubscribeDefaultMode?: 'mention-only' | 'all';
   } = {};
   if (typeof body.disableStreamingCard === 'boolean') patch.disableStreamingCard = body.disableStreamingCard;
   if (typeof body.writableTerminalLinkInCard === 'boolean') patch.writableTerminalLinkInCard = body.writableTerminalLinkInCard;
@@ -895,6 +897,9 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   }
   if (body.regularGroupMentionMode === 'always' || body.regularGroupMentionMode === 'topic' || body.regularGroupMentionMode === 'never') {
     patch.regularGroupMentionMode = body.regularGroupMentionMode;
+  }
+  if (body.docSubscribeDefaultMode === 'mention-only' || body.docSubscribeDefaultMode === 'all') {
+    patch.docSubscribeDefaultMode = body.docSubscribeDefaultMode;
   }
   if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
 

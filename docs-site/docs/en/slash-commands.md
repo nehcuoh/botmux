@@ -86,6 +86,10 @@ See [Session Relay](/en/relay) for details.
 
 `/group <group name>` (alias `/g`): automatically creates a new Lark group, invites you in, transfers ownership to you, and runs the entire group as a standalone CLI session. `@botA @botB /g <group name>` can add multiple bots into the new group at once. See [One-Click Session Group](/en/group) for details.
 
+## 📄 Feishu Doc Comment Entry
+
+`/subscribe-lark-doc <doc link>`: subscribe a Feishu doc — its comments feed into this session and the bot replies back into the comment thread · `/subscribe-lark-doc list` to view subscriptions · `/subscribe-lark-doc off` to unsubscribe. See [Feishu Doc Comment Entry](/en/doc-comment) for details.
+
 ## 👥 Multi-Bot Collaboration
 
 `@botA @botB /t <prompt>` (each opens a new topic) · `@botA @botB /introduce` (register each other's open_id)

@@ -2,14 +2,20 @@
  * cli-selection.ts
  *
  * 单一事实源：把「用户可选的 CLI 形态」从「原始 cliId 列表」抽象成一层
- * **可级联的选择项**。除了原生 CLI，额外提供两个 aiden 网关形态：
+ * **可级联的选择项**。除了原生 CLI，额外提供若干网关形态：
  *   - Aiden × Claude → 底层 cliId=claude-code，启动前缀 `aiden x claude`
  *   - Aiden × Codex  → 底层 cliId=codex，启动前缀 `aiden x codex`
+ *   - CJADK × Claude → 底层 cliId=claude-code，启动前缀 `cjadk claude`
+ *   - CJADK × Codex  → 底层 cliId=codex，启动前缀 `cjadk codex`
  *
- * 这两个形态**不生成任何 wrapper 脚本**：通过 bot 配置的 `wrapperCli`（通用启动前缀）
+ * 这些形态**不生成任何 wrapper 脚本**：通过 bot 配置的 `wrapperCli`（通用启动前缀）
  * 实现——worker 在 spawn 时把启动命令拼成 `<wrapperCli> <CLI 参数>`（纯 argv，跨系统）。
- * `wrapperCli` 是通用机制（也能承载 ccr / claude-w 等），不止 aiden。见 worker.ts 的
+ * `wrapperCli` 是通用机制（也能承载 ccr / claude-w 等），不止 aiden / cjadk。见 worker.ts 的
  * wrapperCli 处理与 {@link buildWrappedLaunch} / {@link stripSettingsArgs}。
+ *
+ * aiden 与 cjadk 的差异：`aiden x claude` 不收 `--settings`（要剥掉），而 cjadk
+ * （`allowUnknownOption`）把全部 passthrough 参数原样转发给真正的 claude/codex，
+ * `--settings`（承载 bypass 键）必须保留，故不走剥离分支。
  *
  * 三处入口（终端 setup / 终端 bot 编辑 / dashboard 网页添加机器人）共用本模块：
  *   - 展示：`CLI_SELECT_OPTIONS`（扁平，web 下拉 + 非 TTY 回退）/ `CLI_SELECT_TREE`（级联，终端 TUI）
@@ -53,25 +59,90 @@ const AIDEN_X_CODEX: CliSelectOption = { key: 'aiden-x-codex', label: 'Aiden × 
 
 const AIDEN_VARIANTS: ReadonlyArray<CliSelectOption> = [AIDEN_NATIVE, AIDEN_X_CLAUDE, AIDEN_X_CODEX];
 
+// ─── cjadk 选项 ──────────────────────────────────────────────────────────────
+// cjadk 没有「原生 agent」模式，只是个装配启动器（`cjadk <agent>`），故只有 × 变体。
+
+const CJADK_X_CLAUDE: CliSelectOption = { key: 'cjadk-x-claude', label: 'CJADK × Claude', cliId: 'claude-code', wrapperCli: 'cjadk claude' };
+const CJADK_X_CODEX: CliSelectOption = { key: 'cjadk-x-codex', label: 'CJADK × Codex', cliId: 'codex', wrapperCli: 'cjadk codex' };
+
+const CJADK_VARIANTS: ReadonlyArray<CliSelectOption> = [CJADK_X_CLAUDE, CJADK_X_CODEX];
+
+// ─── ttadk 选项 ──────────────────────────────────────────────────────────────
+// ttadk（@byted/ttadk）跟 cjadk 一样是网关装配启动器：`ttadk <子命令>` 是
+// `ttadk code -t <tool>` 的快捷写法，启动真实 CLI 前注入网关鉴权 env。与 cjadk
+// 的关键差异：ttadk 默认会弹「交互式选模型菜单」卡住 PTY，靠 **`-m <model>`** 跳过
+// （而非 cjadk 的 CJADK_INTERACTIVE env 开关），故模型对 managed 模型类 CLI 必填。
+// CoCo 例外（ttadk 内部 requiresManagedModel=false，不弹菜单、不接受 -m）。
+//
+// 模型不写死在 wrapperCli，而是复用 bot 的通用 `model` 字段（dashboard 可动态改）：
+// 启动期由 worker 检测 ttadk 前缀，把 `model` 注入成 ttadk 的 `-m`（见
+// {@link buildWrappedLaunch} 的 `ttadkModel` 形参），并**不**把 model 透给底层适配器
+// （否则真实 CLI 会再吃一个 --model 重复）。ttadk 的 code 命令用
+// `allowUnknownOption + enablePositionalOptions`，故 botmux 适配器的其余参数
+// （--settings/--dangerously-skip-permissions/--session-id…）原样 bare 透传给真实 CLI，
+// 无需 `--` 分隔（与 cjadk 同）。Cursor 走 ttadk 的 `cursor-cli` 子命令（cliId 仍是 cursor）。
+
+/** ttadk 默认模型（dashboard 占位 / 启动期空值兜底，CoCo 不适用）。 */
+export const TTADK_DEFAULT_MODEL = 'glm-5.1';
+
+/** dashboard 模型框候选（账号不同会变，仅作建议，仍可自由填任意模型 id）。 */
+export const TTADK_MODEL_SUGGESTIONS: ReadonlyArray<string> = [
+  'glm-5.1',
+  'glm-5',
+  'kimi-k2.5',
+  'gpt-5.3-codex',
+  'gpt-5.2',
+  'gpt-5.2-codex',
+];
+
+/** ttadk 子命令中**不接受 `-m`**（requiresManagedModel=false）的那些——目前仅 coco。 */
+const TTADK_NO_MODEL_SUBCOMMANDS: ReadonlySet<string> = new Set(['coco']);
+
+const TTADK_X_CLAUDE: CliSelectOption = { key: 'ttadk-x-claude', label: 'TTADK × Claude', cliId: 'claude-code', wrapperCli: 'ttadk claude' };
+const TTADK_X_CODEX: CliSelectOption = { key: 'ttadk-x-codex', label: 'TTADK × Codex', cliId: 'codex', wrapperCli: 'ttadk codex' };
+const TTADK_X_OPENCODE: CliSelectOption = { key: 'ttadk-x-opencode', label: 'TTADK × OpenCode', cliId: 'opencode', wrapperCli: 'ttadk opencode' };
+const TTADK_X_COCO: CliSelectOption = { key: 'ttadk-x-coco', label: 'TTADK × CoCo', cliId: 'coco', wrapperCli: 'ttadk coco' };
+const TTADK_X_CURSOR: CliSelectOption = { key: 'ttadk-x-cursor', label: 'TTADK × Cursor', cliId: 'cursor', wrapperCli: 'ttadk cursor-cli' };
+const TTADK_X_GEMINI: CliSelectOption = { key: 'ttadk-x-gemini', label: 'TTADK × Gemini', cliId: 'gemini', wrapperCli: 'ttadk gemini' };
+
+const TTADK_VARIANTS: ReadonlyArray<CliSelectOption> = [
+  TTADK_X_CLAUDE, TTADK_X_CODEX, TTADK_X_OPENCODE, TTADK_X_COCO, TTADK_X_CURSOR, TTADK_X_GEMINI,
+];
+
+/** 顶层 CLI 之外、纯 wrapperCli 网关分组（不对应任何原生 cliId），追加到树/列表末尾。 */
+const EXTRA_GATEWAY_GROUPS: ReadonlyArray<CliSelectGroup> = [
+  { key: 'cjadk', label: 'CJADK', children: CJADK_VARIANTS },
+  { key: 'ttadk', label: 'TTADK', children: TTADK_VARIANTS },
+];
+
 // ─── 扁平 / 级联 视图（均派生自 bot-config-editor 的 CLI_OPTIONS，避免再抄一份）──
 
 /**
- * 级联树（终端 TUI 用）：顺序同 CLI_OPTIONS；'aiden' 一项展开成 children。
+ * 级联树（终端 TUI 用）：顺序同 CLI_OPTIONS；'aiden' 一项展开成 children；
+ * 末尾追加无原生 cliId 的网关分组（CJADK / TTADK）。
  */
-export const CLI_SELECT_TREE: ReadonlyArray<CliSelectGroup> = CLI_OPTIONS.map((o) =>
-  o.id === 'aiden'
-    ? { key: 'aiden', label: 'Aiden', children: AIDEN_VARIANTS }
-    : { key: o.id, label: o.label, option: { key: o.id, label: o.label, cliId: o.id } },
-);
+export const CLI_SELECT_TREE: ReadonlyArray<CliSelectGroup> = [
+  ...CLI_OPTIONS.map((o): CliSelectGroup =>
+    o.id === 'aiden'
+      ? { key: 'aiden', label: 'Aiden', children: AIDEN_VARIANTS }
+      : { key: o.id, label: o.label, option: { key: o.id, label: o.label, cliId: o.id } },
+  ),
+  ...EXTRA_GATEWAY_GROUPS,
+];
 
 /**
- * 扁平选项（web 下拉 + 非 TTY 回退用）：在 'aiden' 之后紧跟两个 aiden×* 项。
+ * 扁平选项（web 下拉 + 非 TTY 回退用）：'aiden' 之后紧跟两个 aiden×* 项，
+ * 末尾依次追加 cjadk×* 与 ttadk×* 项。
  */
-export const CLI_SELECT_OPTIONS: ReadonlyArray<CliSelectOption> = CLI_OPTIONS.flatMap((o) =>
-  o.id === 'aiden'
-    ? AIDEN_VARIANTS
-    : [{ key: o.id, label: o.label, cliId: o.id }],
-);
+export const CLI_SELECT_OPTIONS: ReadonlyArray<CliSelectOption> = [
+  ...CLI_OPTIONS.flatMap((o) =>
+    o.id === 'aiden'
+      ? AIDEN_VARIANTS
+      : [{ key: o.id, label: o.label, cliId: o.id }],
+  ),
+  ...CJADK_VARIANTS,
+  ...TTADK_VARIANTS,
+];
 
 const OPTION_BY_KEY: ReadonlyMap<string, CliSelectOption> = new Map(
   CLI_SELECT_OPTIONS.map((o) => [o.key, o]),
@@ -131,19 +202,86 @@ export function stripSettingsArgs(args: ReadonlyArray<string>): string[] {
   return out;
 }
 
+/** 该前缀是否为 ttadk 网关（`ttadk <子命令> …`）。 */
+export function isTtadkWrapper(wrapperCli: string | undefined): boolean {
+  return !!wrapperCli && parseWrapperCli(wrapperCli)[0] === 'ttadk';
+}
+
+/** ttadk 该子命令是否接受 `-m <model>`（CoCo 等 requiresManagedModel=false 的不接受）。非 ttadk 前缀返回 false。 */
+export function ttadkAcceptsModel(wrapperCli: string | undefined): boolean {
+  if (!wrapperCli) return false;
+  const tokens = parseWrapperCli(wrapperCli);
+  return tokens[0] === 'ttadk' && !!tokens[1] && !TTADK_NO_MODEL_SUBCOMMANDS.has(tokens[1]);
+}
+
+/** buildWrappedLaunch 的可选项。 */
+export interface WrappedLaunchOptions {
+  /**
+   * ttadk 网关专用：注入到 `ttadk <子命令> -m <model>` 的模型 id。空/未传时
+   * 用 {@link TTADK_DEFAULT_MODEL} 兜底；不接受 -m 的子命令（CoCo）忽略此项。
+   */
+  readonly ttadkModel?: string;
+}
+
+/**
+ * ttadk 前缀参数（不含 bin `ttadk` 本身）：`<子命令> [-m <model>] --skip-check`。
+ *   - `-m <model>`：跳过 ttadk 交互式选模型菜单（CoCo 等 requiresManagedModel=false 的子命令不注入）
+ *   - `--skip-check`：跳过 ttadk preflight，避免交互/卡顿
+ * 单一事实源：spawn（{@link buildTtadkLaunch}）与 session-closed 卡片的手动 resume
+ * 命令（{@link decorateResumeForWrapper}）都用它，保证两处的 ttadk 启动形态一致。
+ */
+function ttadkPrefixArgs(tokens: ReadonlyArray<string>, ttadkModel: string | undefined): string[] {
+  // tokens = ['ttadk', '<子命令>', ...(罕见的额外前缀 token)]
+  const sub = tokens[1];
+  const out: string[] = [];
+  if (sub) out.push(sub);
+  if (sub && !TTADK_NO_MODEL_SUBCOMMANDS.has(sub)) {
+    out.push('-m', (ttadkModel ?? '').trim() || TTADK_DEFAULT_MODEL);
+  }
+  out.push('--skip-check');
+  return [...out, ...tokens.slice(2)];
+}
+
+/**
+ * ttadk 启动构造：`ttadk <子命令> [-m <model>] --skip-check <CLI 参数…>`。
+ * CLI 参数 bare 透传（ttadk code 命令 allowUnknownOption + enablePositionalOptions），无需 `--`。
+ * 模型由调用方从 bot.model 传入（见 worker.ts），故不写死在 wrapperCli 里、可在 dashboard 动态改。
+ */
+function buildTtadkLaunch(
+  tokens: ReadonlyArray<string>,
+  cliArgs: ReadonlyArray<string>,
+  binResolver: (bin: string) => string,
+  ttadkModel: string | undefined,
+): { bin: string; args: string[] } {
+  return { bin: binResolver('ttadk'), args: [...ttadkPrefixArgs(tokens, ttadkModel), ...cliArgs] };
+}
+
+/**
+ * /botconfig 等配置卡的 ttadk 模型候选：ttadk 网关 bot 返回 ttadk 模型候选
+ * （{@link TTADK_MODEL_SUGGESTIONS}；CoCo 等不接受 -m 的返回 `[]` = 不渲染模型下拉）；
+ * 非 ttadk 返回 `null`，调用方据此回落底层适配器自己的 modelChoices。
+ */
+export function ttadkConfigModelChoices(wrapperCli: string | undefined): string[] | null {
+  if (!isTtadkWrapper(wrapperCli)) return null;
+  return ttadkAcceptsModel(wrapperCli) ? [...TTADK_MODEL_SUGGESTIONS] : [];
+}
+
 /**
  * 由 wrapperCli 前缀 + 底层 CLI 的 args 构造实际 spawn 的 `{ bin, args }`。
  *   - bin = 前缀首 token（经 binResolver 走 PATH 解析）
  *   - args = 前缀其余 token + CLI 参数（aiden x claude 形态会先剥掉 --settings）
+ *   - ttadk 网关走专门分支注入 `-m <model> --skip-check`（见 {@link buildTtadkLaunch}）
  * 前缀为空时返回 `{ bin: '', args }`，调用方据此跳过（不改写 spawn）。
  */
 export function buildWrappedLaunch(
   wrapperCli: string,
   cliArgs: ReadonlyArray<string>,
   binResolver: (bin: string) => string = (b) => b,
+  opts: WrappedLaunchOptions = {},
 ): { bin: string; args: string[] } {
   const tokens = parseWrapperCli(wrapperCli);
   if (tokens.length === 0) return { bin: '', args: [...cliArgs] };
+  if (tokens[0] === 'ttadk') return buildTtadkLaunch(tokens, cliArgs, binResolver, opts.ttadkModel);
   const forwarded = isAidenXClaude(tokens) ? stripSettingsArgs(cliArgs) : [...cliArgs];
   return { bin: binResolver(tokens[0]), args: [...tokens.slice(1), ...forwarded] };
 }
@@ -152,9 +290,21 @@ export function buildWrappedLaunch(
  * 把适配器给出的「裸 CLI 恢复命令」改写成 wrapperCli 形态，供 session-closed 卡片里
  * 展示给用户手动 resume。例：`claude --resume <id>` + 前缀 `aiden x claude` →
  * `aiden x claude --resume <id>`。wrapperCli 未设时原样返回。
+ *
+ * ttadk 特例：必须带上 `-m <model> --skip-check`（与 {@link buildTtadkLaunch} 同），
+ * 否则用户复制粘贴这条 resume 命令会卡在 ttadk 的交互式选模型菜单。模型从
+ * `opts.ttadkModel`（= bot.model）取，空则用默认值（CoCo 不带 -m）。
  */
-export function decorateResumeForWrapper(cmd: string, wrapperCli: string | undefined): string {
+export function decorateResumeForWrapper(
+  cmd: string,
+  wrapperCli: string | undefined,
+  opts: { ttadkModel?: string } = {},
+): string {
   if (!wrapperCli || !wrapperCli.trim()) return cmd;
   const rest = cmd.replace(/^\S+\s*/, ''); // 去掉首个 token（底层 bin 名）
+  if (isTtadkWrapper(wrapperCli)) {
+    const prefix = ['ttadk', ...ttadkPrefixArgs(parseWrapperCli(wrapperCli), opts.ttadkModel)].join(' ');
+    return `${prefix} ${rest}`.trimEnd();
+  }
   return `${wrapperCli.trim()} ${rest}`.trimEnd();
 }

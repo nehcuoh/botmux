@@ -313,10 +313,13 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       ? b.regularGroupReplyMode : 'chat';
     const mention: string = (b.regularGroupMentionMode === 'topic' || b.regularGroupMentionMode === 'never')
       ? b.regularGroupMentionMode : 'always';
+    const docMode: string = b.docSubscribeDefaultMode === 'all' ? 'all' : 'mention-only';
     const opt = (v: string, label: string) =>
       `<option value="${v}" ${regular === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     const mopt = (v: string, label: string) =>
       `<option value="${v}" ${mention === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const dopt = (v: string, label: string) =>
+      `<option value="${v}" ${docMode === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     return `<section class="bd-section">
       <h3 class="bd-section-title">${t('botDefaults.sectionSessionMode')}</h3>
       <div class="bd-row">
@@ -358,6 +361,19 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         <small class="bd-help">${t('botDefaults.mentionModeHelp')}</small>
         <div class="actions">
           <span class="oncall-status" data-mention-mode-status></span>
+        </div>
+      </div>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.docSubscribeMode')}</span>
+          <select data-input="docSubscribeDefaultMode">
+            ${dopt('mention-only', t('botDefaults.docSubscribeModeMention'))}
+            ${dopt('all', t('botDefaults.docSubscribeModeAll'))}
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.docSubscribeModeHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-doc-subscribe-mode-status></span>
         </div>
       </div>
     </section>`;
@@ -607,6 +623,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
               cached.autoStartOnNewTopic = body.autoStartOnNewTopic;
               cached.regularGroupReplyMode = body.regularGroupReplyMode;
               cached.regularGroupMentionMode = body.regularGroupMentionMode;
+              cached.docSubscribeDefaultMode = body.docSubscribeDefaultMode;
             }
           } else {
             statusEl.textContent = `✗ ${body.error ?? r.status}`;
@@ -755,6 +772,20 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
             { regularGroupMentionMode: mentionModeSel.value },
             mentionModeSel,
             mentionModeStatusEl,
+          );
+        });
+      }
+
+      // ── 文档订阅默认触发范围（bot-global）─────────────────────────────────
+      // mention-only = 仅评论 @ 我才触发（默认）；all = 所有新评论都触发。
+      const docModeSel = card.querySelector<HTMLSelectElement>('select[data-input=docSubscribeDefaultMode]');
+      const docModeStatusEl = card.querySelector<HTMLSpanElement>('[data-doc-subscribe-mode-status]');
+      if (docModeSel) {
+        docModeSel.addEventListener('change', () => {
+          putCardPref(
+            { docSubscribeDefaultMode: docModeSel.value },
+            docModeSel,
+            docModeStatusEl,
           );
         });
       }

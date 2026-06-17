@@ -86,6 +86,10 @@
 
 `/group <群名>`（别名 `/g`）：自动新建飞书群、邀请你进群、转让群主，整个群作为一个独立 CLI 会话。`@botA @botB /g <群名>` 可把多个机器人一并拉进新群。详见 [一键建会话群](/group)。
 
+## 📄 飞书文档评论入口
+
+`/subscribe-lark-doc <文档链接>`：订阅一篇飞书文档，文档评论喂进本会话、机器人回复发回评论讨论串 · `/subscribe-lark-doc list` 查看已订阅 · `/subscribe-lark-doc off` 退订。详见 [飞书文档评论入口](/doc-comment)。
+
 ## 👥 多机器人协作
 
 `@botA @botB /t <prompt>`（各自开新话题）· `@botA @botB /introduce`（互相登记 open_id）

@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { createHmac } from 'node:crypto';
 import {
   classifyDashboard404,
+  classifyDashboard401,
   callDashboard,
   type DashboardEndpoint,
 } from '../src/cli/dashboard-endpoint.js';
@@ -30,6 +31,7 @@ const SECRET = Buffer.from('test-secret').toString('base64url');
 type PortBehaviour =
   | { kind: 'dashboard'; hasToken: boolean }
   | { kind: 'ipc' }            // daemon IPC: unknown-route 404 { error:'not_found' }
+  | { kind: 'auth-fail' }      // loopback shadow / stale dashboard: 401 sig_mismatch
   | { kind: 'down' };          // nothing listening → fetch throws
 
 function makeFetch(ports: Record<number, PortBehaviour>): typeof fetch {
@@ -41,6 +43,9 @@ function makeFetch(ports: Record<number, PortBehaviour>): typeof fetch {
     if (b.kind === 'down') throw new Error('ECONNREFUSED');
     if (b.kind === 'ipc') {
       return new Response(JSON.stringify({ error: 'not_found', path }), { status: 404 });
+    }
+    if (b.kind === 'auth-fail') {
+      return new Response(JSON.stringify({ error: 'unauthorized', reason: 'sig_mismatch' }), { status: 401 });
     }
     // dashboard
     if (path === '/__cli/rotate') {
@@ -86,6 +91,20 @@ describe('classifyDashboard404', () => {
   });
 });
 
+describe('classifyDashboard401', () => {
+  it('treats sig_mismatch as rediscoverable auth-failed', () => {
+    const r = classifyDashboard401(JSON.stringify({ error: 'unauthorized', reason: 'sig_mismatch' }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('auth-failed');
+  });
+
+  it('keeps other 401s as plain http-error', () => {
+    const r = classifyDashboard401(JSON.stringify({ error: 'unauthorized', reason: 'remote_not_loopback' }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('http-error');
+  });
+});
+
 describe('callDashboard', () => {
   it('returns no-secret when the secret file is missing', async () => {
     rmSync(join(dir, '.dashboard-secret'));
@@ -115,6 +134,19 @@ describe('callDashboard', () => {
     expect(r).toEqual({ ok: true, url: 'http://host:7901/?t=fresh' });
     // Port file healed to the discovered dashboard port.
     expect(readFileSync(join(dir, '.dashboard-port'), 'utf8').trim()).toBe('7901');
+  });
+
+  it('self-heals when the recorded loopback port returns sig_mismatch', async () => {
+    setPort(7891);
+    const r = await callDashboard({
+      configDir: dir, defaultPort: 7891, path: '/__cli/rotate',
+      fetchImpl: makeFetch({
+        7891: { kind: 'auth-fail' },
+        7897: { kind: 'dashboard', hasToken: true },
+      }),
+    });
+    expect(r).toEqual({ ok: true, url: 'http://host:7897/?t=fresh' });
+    expect(readFileSync(join(dir, '.dashboard-port'), 'utf8').trim()).toBe('7897');
   });
 
   it('reports wrong-service when the recorded port is IPC and no dashboard is found in range', async () => {

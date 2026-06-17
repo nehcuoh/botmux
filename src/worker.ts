@@ -58,10 +58,11 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
-import { buildWrappedLaunch } from './setup/cli-selection.js';
+import { buildWrappedLaunch, parseWrapperCli, isTtadkWrapper } from './setup/cli-selection.js';
+import { findLaunchedCliPid, scheduleWrapperRealCliPid } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
-import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
+import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
@@ -152,7 +153,7 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -3597,6 +3598,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // the fresh session's first turn.
   lastSpawnEffectiveResume = effectiveResume;
 
+  // ttadk 网关：模型走 ttadk 自己的 `-m`（启动期注入到 ttadk 前缀，见下方 wrapperCli
+  // 分支），不能再把 cfg.model 透给底层适配器，否则真实 CLI 会再吃一个 --model 重复。
+  const ttadkGateway = isTtadkWrapper(cfg.wrapperCli);
   const args = cliAdapter.buildArgs({
     sessionId: effectiveAdapterSessionId,
     resume: effectiveResume,
@@ -3606,7 +3610,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
     locale: cfg.locale,
-    model: cfg.model,
+    model: ttadkGateway ? undefined : cfg.model,
     disableCliBypass: cfg.disableCliBypass === true,
   });
 
@@ -3806,15 +3810,46 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // bin 走 PATH 解析），无需 wrapper 脚本、跨系统。aiden x claude 形态会剥掉 aiden 拒收的
   // --settings（见 buildWrappedLaunch）。与文件沙盒互斥：沙盒已把命令重写成 bwrap，叠加
   // 前缀会破坏隔离，故 sandboxOn 时跳过并告警（网关 + oncall 沙盒本就不是合理组合）。
+  // CJADK_INTERACTIVE is a cjadk-only knob we set on the cjadk wrapper branch
+  // below. Strip any value inherited from the daemon's own env first so a
+  // daemon launched under `cjadk feishu` (which exports it) can't leak it via
+  // the tmux env allowlist into EVERY bot's pane — only the cjadk branch should
+  // ever (re)set it. Harmless for non-cjadk CLIs (they don't read it), but this
+  // keeps the behaviour intentional rather than ambient. (Codex review note.)
+  delete (childEnv as Record<string, string>).CJADK_INTERACTIVE;
+
   if (cfg.wrapperCli && cfg.wrapperCli.trim()) {
     if (sandboxOn) {
       log(`wrapperCli="${cfg.wrapperCli}" ignored: file sandbox enabled and takes precedence (cannot combine launch prefix with bwrap)`);
     } else {
-      const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, (b) => locateOnPath(b) ?? b);
+      const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, (b) => locateOnPath(b) ?? b, {
+        ttadkModel: cfg.model,
+      });
       if (launch.bin) {
         spawnBin = launch.bin;
         spawnArgs = launch.args;
         log(`Launch prefix: spawning ${spawnBin} ${spawnArgs.slice(0, 2).join(' ')} … (cliId=${cfg.cliId})`);
+        // ttadk runs its launched agent through a gateway that pops an interactive
+        // model-picker unless `-m <model>` is given. buildWrappedLaunch injects
+        // `-m <bot.model || glm-5.1> --skip-check` into the ttadk prefix above
+        // (CoCo excluded — it takes no -m). The model is sourced from the bot's
+        // `model` config (editable in the dashboard), NOT baked into wrapperCli.
+        if (ttadkGateway) {
+          log(`ttadk launcher: model=${(cfg.model ?? '').trim() || 'glm-5.1 (default)'} injected as -m, suppressed on underlying ${cfg.cliId}`);
+        }
+        // cjadk runs its launched agent in an INTERACTIVE wrapper by default —
+        // a model/session selector at startup plus terminal quirks that fight
+        // botmux's automated input (the selector eats the first prompt; the
+        // pre-render lag fragments multi-line messages; follow-ups can stick in
+        // the input box). cjadk's own botmux integration (`cjadk feishu`, see its
+        // botmux-wrapper-writer) sets CJADK_INTERACTIVE=0 to disable all of that.
+        // We mirror it here so a `cjadk <agent>` wrapperCli is driven the way
+        // cjadk intends — no selector, clean soft-newline input. Keyed on the
+        // wrapper's leading token so only cjadk launches are affected.
+        if (parseWrapperCli(cfg.wrapperCli)[0] === 'cjadk') {
+          (childEnv as Record<string, string>).CJADK_INTERACTIVE = '0';
+          log('cjadk launcher: set CJADK_INTERACTIVE=0 (non-interactive, mirrors cjadk feishu wrapper)');
+        }
       }
     }
   }
@@ -3841,6 +3876,41 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       log(`Failed to write CLI PID marker: ${err.message}`);
     }
   }
+
+  // wrapperCli launcher (e.g. `aiden x claude`): the pid wired above is the
+  // LAUNCHER's, but it forks the real CLI (real Claude Code, Codex, …) as a
+  // child — and it's THAT child, not the launcher, that writes
+  // ~/.claude/sessions/<pid>.json and owns the transcript jsonl. With the
+  // launcher pid, resolveJsonlFromPid / findOpenClaudeSessionIds (both keyed on
+  // bridgeCliPid / backend.cliPid) find nothing, so the bridge stays pinned to a
+  // path the real CLI never writes — the model's turns never drive working/idle
+  // transitions and `botmux send`-less turns aren't forwarded. This resolver
+  // BFS-finds the real descendant pid and rewires backend.cliPid + bridgeCliPid;
+  // the bridge's 1s pid-follow poller then re-points to the CLI's real jsonl.
+  // Invoked from BOTH the synchronous pid path (tmux/pty, below) and the late
+  // pid fallback (zellij, where getChildPid() is null at spawn) so every backend
+  // is covered. No-op without an effective wrapperCli, and under sandbox (where
+  // wrapperCli is ignored, so there is no launcher indirection). session-id
+  // MARKER inference is unaffected (the launcher-pid marker is still a valid
+  // ancestor of an in-CLI `botmux send`, and the env fallback covers it too).
+  const startWrapperRealPidResolve = (launcherPid: number): void => {
+    if (!cfg.wrapperCli || !cfg.wrapperCli.trim() || sandboxOn || !claudeDataDir) return;
+    const targetCliId = cfg.cliId as CliId;
+    scheduleWrapperRealCliPid(launcherPid, {
+      findRealPid: (lp) => findLaunchedCliPid(lp, targetCliId),
+      getBackend: () => backend,
+      getChildPid: () => backend?.getChildPid?.(),
+      applyRealPid: (realPid) => {
+        log(`wrapperCli "${cfg.wrapperCli}": resolved real CLI pid ${realPid} under launcher ${launcherPid} (cliId=${targetCliId}); rewiring session discovery + bridge`);
+        (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = realPid;
+        // Per-tick maybeFollowSessionRotationViaPid (bridge 1s poller) reads the
+        // module-level bridgeCliPid and re-points to the real CLI's jsonl.
+        bridgeCliPid = realPid;
+      },
+      schedule: (fn, ms) => { setTimeout(fn, ms); },
+    });
+  };
+  if (cliPid) startWrapperRealPidResolve(cliPid);
 
   // Wire pid + cwd so the claude-code adapter's writeInput can read
   // ~/.claude/sessions/<pid>.json — the spawn-time pid-state record. Its
@@ -3883,6 +3953,10 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
           (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = pid;
           (backend as TmuxBackend | PtyBackend | ZellijBackend).cliCwd = cfg.workingDir;
         }
+        // wrapperCli under a late-pid backend (zellij): `pid` here is still the
+        // LAUNCHER. Kick the descendant resolver so the bridge gets the real CLI
+        // pid too (mirrors the synchronous path above). No-op for non-wrapperCli.
+        startWrapperRealPidResolve(pid);
         return;
       }
       if (++attempts < 25) setTimeout(resolveCliPidLate, 120); // ~3s budget
@@ -3914,6 +3988,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       dataDir: claudeDataDir,
     });
   }
+
+  // (wrapperCli real-CLI-pid resolution is wired earlier — see
+  // startWrapperRealPidResolve, invoked from both the synchronous pid path and
+  // the zellij late-pid fallback — so the bridge above gets re-pointed to the
+  // launcher's real CLI child for every backend type.)
 
   // Structured transcript bridge fallback: if the model finishes without
   // calling `botmux send`, harvest the final answer from the CLI transcript

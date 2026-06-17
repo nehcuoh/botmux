@@ -9,7 +9,7 @@ import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
 import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId } from './client.js';
-import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigTextCard, CONFIG_UNSET, buildLandResultCard } from './card-builder.js';
+import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigTextCard, CONFIG_UNSET, buildLandResultCard } from './card-builder.js';
 import { computeSandboxDiff, applySandboxDiff } from '../../services/sandbox-land.js';
 import { findConfigField, applyConfigField, coerceConfigValue, getConfigCardData } from '../../services/bot-config-store.js';
 import { updateBotGrantPrefs } from '../../services/grant-prefs-store.js';
@@ -24,7 +24,8 @@ import {
 } from './workflow-card-handler.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
-import { decorateResumeForWrapper } from '../../setup/cli-selection.js';
+import { buildClosedSessionCard } from '../../core/closed-session-card.js';
+import { ttadkConfigModelChoices } from '../../setup/cli-selection.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
@@ -158,6 +159,7 @@ async function commitRepoSelection(
     rootId: string;
     cardMessageId?: string;
     larkAppId?: string;
+    operatorOpenId?: string;
     activeSessions: Map<string, DaemonSession>;
     sessionReply: (rid: string, content: string, msgType?: string, turnId?: string) => Promise<string>;
   },
@@ -168,7 +170,7 @@ async function commitRepoSelection(
   // confirmation so the user sees a single message, not two.
   opts?: { suppressConfirmReply?: boolean },
 ): Promise<void> {
-  const { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply } = ctx;
+  const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
   const locTarget = localeForBot(ds.larkAppId);
   // `/close` deletes the active-map entry without touching sessionId or
   // pendingRepo — identity against the map is the only tell that the session
@@ -176,11 +178,12 @@ async function commitRepoSelection(
   const repoSessionKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
   const sessionStillActive = () => activeSessions.get(repoSessionKey) === ds;
   const commitGenSessionId = ds.session.sessionId;
-  ds.workingDir = dirPath;
-  ds.session.workingDir = dirPath;
-  sessionStore.updateSession(ds.session);
 
   if (ds.pendingRepo) {
+    // First spawn: pin the new cwd onto the CURRENT session before forking.
+    ds.workingDir = dirPath;
+    ds.session.workingDir = dirPath;
+    sessionStore.updateSession(ds.session);
     const selfBot = getBot(ds.larkAppId);
     const botCfg = selfBot.config;
     const effectiveCliId = sessionCliId(ds);
@@ -241,6 +244,19 @@ async function commitRepoSelection(
     logger.info(`[${tag(ds)}] Repo selected: ${dirPath}, spawning CLI`);
   } else {
     // Mid-session repo switch — close old session, start fresh.
+    // Safety net (mirrors the `/repo` text-command path): build the same
+    // "session closed" card `/close` emits BEFORE displacing the old session
+    // (it reads the live session's identity off `ds`). The new session reuses
+    // this anchor, so the old context would otherwise vanish without a trace
+    // (relay/adopt/resume all hit `anchor_occupied`). The card keeps it
+    // visible and carries the terminal `claude --resume` command.
+    //
+    // The new cwd is NOT written onto the old session here — it would pollute
+    // the displaced session's stored workingDir (and the closed card), so
+    // `claude --resume` later would reopen the old context in the new repo's
+    // cwd. The new repo is pinned onto the fresh session below instead.
+    const closedCard = buildClosedSessionCard(ds, locTarget);
+
     killWorker(ds);
     // Park the current card in `frozenCards` so the next POST under the new
     // session sweeps it via recall. closeSession() wipes the on-disk
@@ -250,6 +266,15 @@ async function commitRepoSelection(
     // stays in the thread instead of vanishing prematurely.
     parkStreamCard(ds);
     sessionStore.closeSession(ds.session.sessionId);
+
+    await deliverEphemeralOrReply(
+      ds,
+      operatorOpenId,
+      closedCard,
+      'interactive',
+      () => sessionReply(rootId, closedCard, 'interactive'),
+    );
+
     const session = sessionStore.createSession(ds.chatId, rootId, dirLabel, ds.chatType);
     ds.session = session;
     ds.lastUserPrompt = undefined;
@@ -259,6 +284,7 @@ async function commitRepoSelection(
     // workingDir and the worker spawns in the bot's default cwd, so
     // `claude --resume` looks in the wrong .claude/projects/<hash>/ dir and
     // exits code 0 immediately, crash-looping until the rate-limiter trips.
+    ds.workingDir = dirPath;
     ds.session.workingDir = dirPath;
     ds.session.larkAppId = ds.larkAppId;
     sessionStore.updateSession(ds.session);
@@ -563,7 +589,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (admins.length === 0 || !operatorOpenId || !admins.includes(operatorOpenId)) {
       return { toast: { type: 'error', content: t('cmd.config.not_admin', undefined, loc) } };
     }
+    // ttadk 网关 bot 用 ttadk 网关模型候选（glm-5.1…），非底层适配器的 opus/gpt-5
+    // （否则被 worker 注入成 `ttadk -m opus` 用错模型启动失败）；CoCo 无候选。
     const modelChoices = (() => {
+      const ttadkChoices = ttadkConfigModelChoices(cbot.config.wrapperCli);
+      if (ttadkChoices !== null) return ttadkChoices;
       try { return createCliAdapterSync(cbot.config.cliId, cbot.config.cliPathOverride).modelChoices ?? []; } catch { return []; }
     })();
     const reRender = () => {
@@ -925,34 +955,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
 
     if (actionType === 'close' && ds) {
-      const closedSessionId = ds.session.sessionId;
-      const closedTitle = ds.session.title;
       const botCfg = getBot(ds.larkAppId).config;
-      const closedCliId = ds.session.cliId ?? botCfg.cliId;
-      const closedAnchor = sessionAnchorId(ds);
-      const closedWorkingDir = ds.session.workingDir;
-      const cliResumeCommand = (() => {
-        try {
-          const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
-          const raw = adapter.buildResumeCommand?.({
-            sessionId: closedSessionId,
-            cliSessionId: ds.session.cliSessionId,
-          }) ?? null;
-          return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
-        } catch { return null; }
-      })();
+      // Build the closed card BEFORE killWorker/closeSession — it reads the
+      // live session's identity off `ds`.
+      const card = buildClosedSessionCard(ds, localeForBot(ds.larkAppId));
       killWorker(ds);
-      sessionStore.closeSession(closedSessionId);
+      sessionStore.closeSession(ds.session.sessionId);
       activeSessions.delete(sKey);
-      const card = buildSessionClosedCard(
-        closedSessionId,
-        closedAnchor,
-        closedTitle,
-        closedCliId,
-        closedWorkingDir,
-        cliResumeCommand,
-        localeForBot(ds.larkAppId),
-      );
       // The closed card carries session title / CLI name / workingDir / resume
       // command. In private-card mode those must not leak to the group — send the
       // closed card ephemeral to the same owner audience instead. No group
@@ -1524,7 +1533,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const selectedPath = validation.resolvedPath;
       const displayName = pathBasename(selectedPath) || selectedPath;
       await commitRepoSelection(
-        { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply },
+        { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply },
         selectedPath,
         displayName,
       );
@@ -1726,7 +1735,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // Shared commit context for a resolved directory — funnels the dropdown,
   // worktree and manual-entry flows through the same module-level
   // commitRepoSelection (pin dir, then fork pending CLI or close+recreate).
-  const commitCtx = { ds: targetDs, rootId, cardMessageId, larkAppId, activeSessions, sessionReply };
+  const commitCtx = { ds: targetDs, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply };
 
   if (isWorktreeOpen) {
     // Worktree creation involves a `git fetch` that can take many seconds —

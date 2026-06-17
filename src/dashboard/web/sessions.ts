@@ -48,6 +48,7 @@ function formatTokenCount(value: unknown): string {
 const CLI_FILTER_OPTIONS = [
   'claude-code',
   'seed',
+  'relay',
   'codex',
   'codex-app',
   'cursor',
