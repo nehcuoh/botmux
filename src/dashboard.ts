@@ -1,5 +1,5 @@
 // src/dashboard.ts
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, get as httpGet, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import {
   readFileSync, existsSync, mkdirSync, statSync, createReadStream,
@@ -162,6 +162,37 @@ function dashboardPortAvailable(port: number): Promise<boolean> {
   // binds wildcard. On macOS another process can hold 127.0.0.1:port while a
   // wildcard bind still succeeds, causing CLI HMAC calls to hit that process.
   return tcpPortAvailable('127.0.0.1', port);
+}
+
+// Per-process random marker served at /__selfcheck. Lets verifyDashboardBinding
+// confirm a loopback request to our just-bound wildcard port reaches THIS
+// process and not a shadow holding 127.0.0.1:port. The value is meaningless to
+// anyone else, so exposing it is safe.
+const DASHBOARD_SELF_NONCE = randomBytes(16).toString('hex');
+
+/**
+ * Post-bind loopback identity check handed to listenWithProbe (verifyBound).
+ * dashboardPortAvailable is a PRE-bind gate, but on macOS a loopback occupant
+ * can appear in the race window between that check and the wildcard listen, and
+ * a 0.0.0.0 bind succeeds anyway while loopback routing favours the occupant —
+ * so the dashboard would advertise a port it doesn't actually own on loopback.
+ * This runs AFTER listen: dial 127.0.0.1:port/__selfcheck and require OUR nonce
+ * back. A shadow answers with its own body/404 → reject → listenWithProbe steps
+ * up. Number-independent: it works no matter which port or who is shadowing.
+ * Loopback-host binds can't be shadowed, so they short-circuit to true.
+ */
+function verifyDashboardBinding(port: number): Promise<boolean> {
+  if (!isWildcardBindHost(config.dashboard.host)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const req = httpGet({ host: '127.0.0.1', port, path: '/__selfcheck', agent: false }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; if (body.length > 128) req.destroy(); });
+      res.on('end', () => resolve(res.statusCode === 200 && body === DASHBOARD_SELF_NONCE));
+    });
+    req.setTimeout(2000, () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
 }
 
 /** Sign a loopback request to a daemon's write-link route. The daemon verifies
@@ -896,6 +927,14 @@ const server = createServer(async (req, res) => {
     // Health probe (no auth) — for pm2
     if (url.pathname === '/__health') {
       return jsonRes(res, 200, { ok: true });
+    }
+
+    // Loopback self-identification (no auth): echoes this process's nonce so the
+    // post-bind shadow check (listen-with-probe verifyBound) can distinguish our
+    // server from a process shadowing 127.0.0.1:port. Returns only the nonce.
+    if (url.pathname === '/__selfcheck') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end(DASHBOARD_SELF_NONCE);
     }
 
     if (await handleWebhookRoute(req, res, url, {
@@ -2325,6 +2364,7 @@ listenWithProbe({
   port: config.dashboard.port,
   host: config.dashboard.host,
   portAvailable: dashboardPortAvailable,
+  verifyBound: verifyDashboardBinding,
   log: (m) => logger.warn(`[dashboard] ${m}`),
 }).then((port) => {
   boundDashboardPort = port;

@@ -17,12 +17,15 @@ import { cliAuthBind, loadDashboardSecret, signCliAuth } from '../dashboard/auth
  *    misleading `Rotation failed: no-active-token` when the real problem is that
  *    `.dashboard-port` points at the wrong service.
  *
- * 2. **`.dashboard-port` can go stale.** The dashboard and the daemon IPC server
- *    both `listenWithProbe` upward from adjacent base ports (7891 vs 7892) with
- *    heavily overlapping probe ranges, so across restarts the recorded dashboard
- *    port can end up owned by an IPC server. When the recorded port answers as
- *    the *wrong service*, we rediscover the real dashboard by HMAC-probing the
- *    probe range (only the genuine dashboard can validate the signature) and
+ * 2. **`.dashboard-port` can go stale.** The dashboard (wildcard) and the daemon
+ *    IPC servers (loopback) both `listenWithProbe` upward. Their base ports are
+ *    now kept disjoint (config.dashboard.port 7891 + probe span vs ipcBasePort
+ *    7950 — see config.ts, guarded by dashboard-ipc-port-range.test.ts), so a
+ *    recorded dashboard port should no longer end up owned by an IPC server. The
+ *    HMAC self-heal below stays as defense-in-depth: when the recorded port
+ *    answers as the *wrong service* (e.g. a foreign squatter pushed the dashboard
+ *    onto an unexpected port), we rediscover the real dashboard by HMAC-probing
+ *    the probe range (only the genuine dashboard can validate the signature) and
  *    self-heal `.dashboard-port`.
  */
 
