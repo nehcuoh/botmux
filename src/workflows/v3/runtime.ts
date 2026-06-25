@@ -1047,7 +1047,11 @@ export async function runWorkflow(
         `v3 runtime: node "${node.id}" has a humanGate but no resolveGate handler was injected`,
       );
     }
-    const key = `${node.id}::gate`;
+    // Instance-scoped, like the work path (and the waitId above): a cross-node
+    // revisit can leave D#001's gate in flight while D#002's gate is re-dispatched
+    // under the same node.id. Keying by node.id + an unguarded delete would let
+    // D#001's gate settle remove the LIVE D#002 entry → "no progress possible" crash.
+    const key = `${instanceId ?? node.id}::gate`;
     const p = deps
       .resolveGate({ nodeId: node.id, prompt: gate.prompt, waitId, runDir })
       .then(({ resolution, by, selected }) => {
@@ -1059,7 +1063,7 @@ export async function runWorkflow(
         appendEvent(journalPath, { type: 'gateResolved', nodeId: node.id, waitId, resolution: 'rejected', by: 'system' });
       })
       .finally(() => {
-        inFlight.delete(key);
+        if (inFlight.get(key) === p) inFlight.delete(key);
       });
     inFlight.set(key, p);
   }
@@ -1244,7 +1248,9 @@ export async function runWorkflow(
     });
 
     nodeControllers.get(instanceId ?? a.nodeId)?.abort();
-    const gateKey = `${a.nodeId}::gate`;
+    // Match startGate's instance-scoped gate key so the right instance's gate
+    // in-flight entry is cleared (not a stale node.id-keyed one that never existed).
+    const gateKey = `${instanceId ?? a.nodeId}::gate`;
     if (inFlight.has(gateKey)) inFlight.delete(gateKey);
     return true;
   }
