@@ -110,42 +110,32 @@ Run one bot on a GLM Coding Plan (or any Anthropic-compatible provider) while an
 | `autoStartOnGroupJoinPrompt` | Paired with the above: the first-round prompt for proactive start; if empty / blank, opens with an empty message and lets the bot read the group context itself. Meaningless when `autoStartOnGroupJoin` is off |
 | `autoStartOnNewTopic` | When `true`, the first message of every new topic in a topic group starts working automatically without an @ (no effect in plain groups). Defaults to passive (only @ triggers) |
 
-## Content triggers
+## Summary command
 
 | Field | Description |
 |------|------|
-| `contentTriggers` | Per-bot keyword / regex triggers. The default remains @-only; only messages matching one of these rules can wake this bot without an @ in groups or topics. On match, botmux sends `action.prompt` plus the configured history context to the CLI instead of treating the original message as the user prompt. Human senders still must pass `canTalk`; bot-authored non-@ messages are ignored by default, but a single trigger can set `allowBotMessages: true` to opt in to messages from other bots |
+| `summaryRange` | History range used by the explicit `@bot /summary` command. `limit` is the latest N messages in a regular group, defaulting to 50; `sinceHours` is the latest N hours in a regular group, defaulting to 24. Set either field to `0` to remove that limit. Topic groups always read the current topic/thread history |
 
 Example:
 
 ```json
 {
-  "contentTriggers": [
-    {
-      "name": "summary-trigger",
-      "enabled": true,
-      "scope": "both",
-      "allowBotMessages": false,
-      "match": { "type": "keyword", "pattern": "summary", "caseSensitive": false },
-      "history": {
-        "topic": { "mode": "current-thread" },
-        "regularGroup": { "mode": "recent-messages", "limit": 50 }
-      },
-      "action": {
-        "type": "start-or-wake-session",
-        "prompt": "Summarize the configured conversation history."
-      }
-    }
-  ]
+  "summaryRange": {
+    "limit": 50,
+    "sinceHours": 24
+  }
 }
 ```
 
-- `scope`: `topic`, `regularGroup`, or `both`.
-- `allowBotMessages`: defaults to `false`. When `true`, non-@ text/card messages from other bots may match this trigger. The current bot's own messages are still ignored to avoid loops.
-- `match.type`: `keyword` or `regex`; invalid regexes are dropped with a log message and do not crash the daemon.
-- `history.topic.mode`: currently `current-thread`, reading the current topic/thread.
-- `history.regularGroup.mode`: currently `recent-messages`. `limit` means the latest N messages; `sinceHours` means the latest N hours. A value of `0` means unlimited for that dimension. If `limit` is omitted, it defaults to 50.
-- Explicit command: `@bot /summary` in a group uses the dashboard default-summary `limit` / `sinceHours` range to read history and summarize, even when keyword triggering is disabled. If no range is configured, it defaults to the latest 50 messages / 24 hours.
+- Only the explicit `@bot /summary` command triggers a summary. Messages that do not mention the bot still follow the existing group/topic routing rules and are not woken up by keywords.
+- The dashboard "/summary Range" controls this `summaryRange` field.
+- In regular groups, `limit` and `sinceHours` are both applied. If both are `0`, botmux reads all retrievable history.
+
+## Legacy content trigger config
+
+| Field | Description |
+|------|------|
+| `contentTriggers` | **Legacy / no longer active.** Older builds used this field for keyword / regex triggers without an @mention, but current message routing no longer wakes a bot from `contentTriggers`. The parser keeps this field only for `bots.json` compatibility: if an old dashboard-managed trigger named `dashboard-default-summary-trigger` exists, botmux may read its `limit` / `sinceHours` as a fallback for `summaryRange`. New configs should use `summaryRange` |
 
 ## Voice
 

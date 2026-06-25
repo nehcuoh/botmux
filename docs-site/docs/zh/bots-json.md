@@ -110,42 +110,32 @@
 | `autoStartOnGroupJoinPrompt` | 配合上面：自动开工的首轮 prompt；留空 / 空白则空消息开场，让 bot 自己读群上下文。`autoStartOnGroupJoin` 关闭时无意义 |
 | `autoStartOnNewTopic` | `true` 时，话题群里每个新话题的首条消息无需 @ 也自动开工（普通群无效）。默认被动（仅 @ 触发） |
 
-## 内容触发
+## 总结命令
 
 | 字段 | 说明 |
 |------|------|
-| `contentTriggers` | 按 bot 配置的关键词 / 正则触发器。默认仍然只有 @ 才响应；只有命中这里的规则时，群消息或话题消息才可免 @ 唤醒本 bot。命中后发送 `action.prompt` 加历史上下文给 CLI，而不是把原消息当普通问题。仅 `canTalk` 已放行的真人发送者可触发；bot 自己和其它 bot 的非 @ 消息默认不会触发，单条 trigger 可用 `allowBotMessages: true` 显式允许其它 bot 的消息触发 |
+| `summaryRange` | 显式总结命令 `@机器人 /summary` 使用的历史读取范围。`limit` 表示普通群最近 N 条消息，默认 50；`sinceHours` 表示普通群最近 N 小时，默认 24。任一字段设为 `0` 表示该维度不限制。话题群始终读取当前话题/thread 历史 |
 
 示例：
 
 ```json
 {
-  "contentTriggers": [
-    {
-      "name": "summary-trigger",
-      "enabled": true,
-      "scope": "both",
-      "allowBotMessages": false,
-      "match": { "type": "keyword", "pattern": "总结", "caseSensitive": false },
-      "history": {
-        "topic": { "mode": "current-thread" },
-        "regularGroup": { "mode": "recent-messages", "limit": 50 }
-      },
-      "action": {
-        "type": "start-or-wake-session",
-        "prompt": "请根据当前会话历史生成总结。"
-      }
-    }
-  ]
+  "summaryRange": {
+    "limit": 50,
+    "sinceHours": 24
+  }
 }
 ```
 
-- `scope`: `topic` / `regularGroup` / `both`。
-- `allowBotMessages`: 默认 `false`。设为 `true` 时，其它 bot 发出的非 @ 文本/卡片消息也可命中该 trigger；本 bot 自己发出的消息仍会被忽略，避免循环。
-- `match.type`: `keyword` 或 `regex`；非法正则会被丢弃并写日志，不会导致 daemon 崩溃。
-- `history.topic.mode`: 当前仅支持 `current-thread`，读取当前话题/thread。
-- `history.regularGroup.mode`: 当前支持 `recent-messages`。`limit` 表示最近 N 条，`sinceHours` 表示最近 N 小时；任一参数为 `0` 表示该维度不限。未配置 `limit` 时默认 50。
-- 显式命令：群聊中 `@机器人 /summary` 会按 dashboard 默认总结配置的 `limit` / `sinceHours` 读取历史并总结；即使未开启关键词触发也可用。未配置时默认最近 50 条 / 最近 24 小时。
+- 只有显式 `@机器人 /summary` 会触发总结；不 @ 机器人时仍按普通群/话题的既有路由规则处理，不会因为关键词自动唤醒。
+- dashboard 的「/summary 总结范围」保存的就是 `summaryRange`。
+- 普通群读取范围会同时受 `limit` 与 `sinceHours` 约束；两者都为 `0` 时表示读取全部可获取历史。
+
+## 旧内容触发配置
+
+| 字段 | 说明 |
+|------|------|
+| `contentTriggers` | **Legacy / 不再生效。** 旧版本曾用于关键词 / 正则免 @ 触发，但当前消息路由不会再根据 `contentTriggers` 唤醒 bot。保留该字段解析仅用于兼容旧 `bots.json`：如果存在名为 `dashboard-default-summary-trigger` 的旧 dashboard 配置，botmux 会尽量从其中迁移/读取 `limit` 与 `sinceHours` 作为 `summaryRange` 的兜底值。新配置请使用 `summaryRange` |
 
 ## 语音
 
