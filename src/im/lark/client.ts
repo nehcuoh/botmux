@@ -1248,7 +1248,12 @@ async function listChatBotsViaMembersBots(
 
 // `/members/bots` returns the observer-scoped mention handle (`bot_id`) and
 // display name only. Bind botmux identity only when a configured bot has already
-// been proven to be in this chat and the name match is unique.
+// been proven to be in this chat and the name match is unique, OR the item's
+// observer-scoped `bot_id` equals a configured row's already-reliable open_id —
+// notably the observer's own bot, whose `/members/bots` `bot_id` IS its self-view
+// open_id. The open_id key guards against display-name drift between
+// `/members/bots` and bots-info.json (e.g. self leaking into <available_bots> as
+// a mentionable peer when its name no longer matches).
 function buildChatBotsFromMembersBotsApi(
   items: ChatBotListApiItem[],
   currentLarkAppId: string,
@@ -1257,11 +1262,13 @@ function buildChatBotsFromMembersBotsApi(
   norm: (s: string) => string,
 ): ChatBotMember[] {
   const configuredByName = new Map<string, ChatBotMember[]>();
+  const configuredByOpenId = new Map<string, ChatBotMember>();
   for (const row of configured) {
     const key = norm(row.displayName);
     const arr = configuredByName.get(key);
     if (arr) arr.push(row);
     else configuredByName.set(key, [row]);
+    if (row.openId) configuredByOpenId.set(row.openId, row);
   }
 
   const out: ChatBotMember[] = [];
@@ -1270,7 +1277,7 @@ function buildChatBotsFromMembersBotsApi(
     if (seenOpenIds.has(item.botId)) continue;
     const key = norm(item.botName);
     const matches = configuredByName.get(key) ?? [];
-    const bound = matches.length === 1 ? matches[0] : undefined;
+    const bound = (matches.length === 1 ? matches[0] : undefined) ?? configuredByOpenId.get(item.botId);
     const crossHit = crossRef.get(key);
     const isSelf = bound?.larkAppId === currentLarkAppId;
     const mentionSource: ChatBotMember['mentionSource'] = crossHit === item.botId

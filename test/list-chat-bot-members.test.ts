@@ -136,6 +136,31 @@ describe('listChatBotMembers', () => {
     });
   });
 
+  it('binds self by open_id when /members/bots display name drifts from bots-info, so self is not surfaced as a peer', async () => {
+    state.dataDir = mkdtempSync(join(tmpdir(), 'botmux-list-chat-bots-'));
+    state.listBotsApiEnabled = true;
+    // /members/bots returns self under a drifted display name, but its
+    // observer-scoped bot_id is self's self-view open_id (observer == self).
+    state.listBotsApiItems = [
+      { bot_id: 'ou_self', bot_name: 'BotSelf Renamed' },
+    ];
+    writeFileSync(join(state.dataDir, 'bots-info.json'), JSON.stringify([
+      { larkAppId: 'cli_self', botOpenId: 'ou_self', botName: 'BotSelf', cliId: 'codex' },
+    ]));
+
+    const { listChatBotMembers } = await import('../src/im/lark/client.js');
+    const bots = await listChatBotMembers('cli_self', 'oc_chat');
+
+    expect(state.listBotsApiCalls).toBe(1);
+    // Bound to self via open_id despite the name mismatch → caller can exclude
+    // self by larkAppId instead of leaking it into <available_bots>.
+    expect(bots.find(b => b.openId === 'ou_self')).toMatchObject({
+      larkAppId: 'cli_self',
+      source: 'configured',
+      mentionSource: 'self',
+    });
+  });
+
   it('treats /members/bots items: [] as authoritative and does not fall back to observed rows', async () => {
     state.dataDir = mkdtempSync(join(tmpdir(), 'botmux-list-chat-bots-'));
     state.listBotsApiEnabled = true;
